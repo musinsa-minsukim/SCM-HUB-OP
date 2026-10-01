@@ -101,14 +101,15 @@ def status(u: str = Depends(user)):
         _, meta = snap()
     except HTTPException:
         meta = {}
-    return {"refreshed_at": meta.get("refreshed_at"), "stock_date": meta.get("stock_date"),
+    return {"refreshed_at": meta.get("refreshed_at"), "scm_refreshed_at": meta.get("scm_refreshed_at"),
+            "stock_date": meta.get("stock_date"),
             "summary": meta.get("summary"), "job": _job}
 
 
-def _run_refresh():
-    _job.update(running=True, error="", started_at=refresh._now())
+def _run_refresh(scm_only: bool = False):
+    _job.update(running=True, error="", started_at=refresh._now(), kind="scm" if scm_only else "full")
     try:
-        refresh.run()
+        refresh.run_scm() if scm_only else refresh.run()
     except Exception as e:
         _job["error"] = f"{e}"
         traceback.print_exc()
@@ -126,6 +127,18 @@ def start_refresh(u: str = Depends(user)):
     _run_refresh()
     if _job["error"]:
         raise HTTPException(500, f"새로고침 실패: {_job['error']}")
+    return {"started": True, "done": True}
+
+
+@app.post("/api/refresh/scm")
+def start_refresh_scm(u: str = Depends(user)):
+    """SCM 상태만 빠른 새로고침(동기) — 매장 운영상태·오프라인 판매 여부만 다시 읽고 보충·업로드 파일 재계산.
+    재고·판매·브랜드 시트는 직전 전체 새로고침 값. SCM-HUB 사본 자체의 30분~1시간 지연은 그대로."""
+    if _job["running"]:
+        return {"started": False, "job": _job}
+    _run_refresh(scm_only=True)
+    if _job["error"]:
+        raise HTTPException(500, f"SCM 새로고침 실패: {_job['error']}")
     return {"started": True, "done": True}
 
 

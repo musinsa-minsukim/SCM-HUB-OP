@@ -71,21 +71,21 @@ export default function App() {
   }, [status?.job?.running]);
 
   // 새로고침은 서버가 끝까지 실행한 뒤 응답한다(Cloud Run CPU 제약). 기다리는 동안 버튼에 진행 표시.
-  const [busy, setBusy] = useState(false);
-  const startRefresh = async () => {
-    setBusy(true);
+  const [busy, setBusy] = useState<"" | "full" | "scm">("");
+  const startRefresh = async (kind: "full" | "scm" = "full") => {
+    setBusy(kind);
     try {
-      await api("/refresh", { method: "POST" });
+      await api(kind === "scm" ? "/refresh/scm" : "/refresh", { method: "POST" });
       setVer((v) => v + 1);
     } catch (e: any) {
       alert(String(e?.message || e));
     } finally {
-      setBusy(false);
+      setBusy("");
       loadStatus();
     }
   };
 
-  const running = busy || status?.job?.running;
+  const running = !!busy || status?.job?.running;
   const Page = { brands: Brands, issues: Issues, matrix: Matrix, replenish: Replenish, uploads: Uploads, search: Search }[view];
   const title = NAV.find((n) => n.key === view)?.label;
 
@@ -125,15 +125,23 @@ export default function App() {
           </select>
           <h2 className="hidden text-base font-semibold tracking-tight text-slate-900 lg:block dark:text-slate-50">{title}</h2>
           <div className="ml-auto flex items-center gap-3 text-xs text-slate-500 dark:text-slate-400">
-            <span title="브랜드 시트·원천 데이터를 마지막으로 읽은 시각">
+            <span title="전체 = 브랜드 시트·재고·판매까지 마지막으로 읽은 시각 / SCM = 매장 운영상태·오프라인 판매 여부를 마지막으로 읽은 시각">
               갱신 {status?.refreshed_at?.slice(5, 16) ?? "—"}
+              {status?.scm_refreshed_at && status.scm_refreshed_at !== status.refreshed_at && <> · SCM {status.scm_refreshed_at.slice(11, 16)}</>}
               {status?.stock_date && <> · 재고 기준 {status.stock_date.slice(5)}</>}
             </span>
             {status?.job?.error && <span className="text-rose-600" title={status.job.error}>새로고침 실패</span>}
-            <button onClick={startRefresh} disabled={running}
+            <button onClick={() => startRefresh("scm")} disabled={running}
+              title="매장 운영상태(운영중/미운영)·비제스트 오프라인 판매 여부만 다시 읽습니다 (약 30초). 운영상태 업로드·비제스트 변경 후 반영 확인용. 원천 사본 지연 30분~1시간은 그대로"
               className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-60 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200">
-              <RefreshCw size={14} className={running ? "animate-spin" : ""} />
-              {running ? "읽는 중…" : "새로고침"}
+              <RefreshCw size={14} className={busy === "scm" ? "animate-spin" : ""} />
+              {busy === "scm" ? "SCM 읽는 중…" : "SCM 상태만"}
+            </button>
+            <button onClick={() => startRefresh("full")} disabled={running}
+              title="브랜드 시트·재고·판매·SCM 상태 전체를 다시 읽습니다 (1~3분)"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-60 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200">
+              <RefreshCw size={14} className={busy === "full" ? "animate-spin" : ""} />
+              {busy === "full" ? "읽는 중…" : "새로고침"}
             </button>
             <button onClick={toggleDark} className="rounded-lg p-2 hover:bg-slate-100 dark:hover:bg-slate-800" aria-label="테마">
               {dark ? <Sun size={16} /> : <Moon size={16} />}

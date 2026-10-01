@@ -112,8 +112,7 @@ def build(rows: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
 
     # 보충 발주 조건 ①: 비제스트 상품(UID) 오프라인 판매 여부 = Y
     #   = SKU 가 연결된 SCM-HUB product 행의 offline_sale_enabled (True → Y)
-    en = df["offline_sale_enabled"].map(lambda v: "Y" if str(v).lower() in ("true", "1") else
-                                        ("N" if str(v).lower() in ("false", "0") else ""))
+    en = df["offline_sale_enabled"].map(offline_yn_from)
     df["offline_yn"] = en.where(df["fk_sku_id"].notna(), "")
     flag((df["offline_yn"] == "N"), "비제스트 오프라인 판매 N")
 
@@ -174,6 +173,19 @@ def build(rows: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0).astype("int64")
     df["off_4w"] = df[["off_w1", "off_w2", "off_w3", "off_w4"]].sum(axis=1)
 
+    return replenish(df)
+
+
+OFFLINE_FLAG = "비제스트 오프라인 판매 N"
+SCM_FLAG = "SCM 운영중 전환 필요"
+
+
+def offline_yn_from(v) -> str:
+    return "Y" if str(v).lower() in ("true", "1") else ("N" if str(v).lower() in ("false", "0") else "")
+
+
+def replenish(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+    """검증 플래그(df['flags'] 리스트) → 심각도 → 보충 필요·MFS 배분·반출. build 와 SCM 빠른 새로고침이 같이 쓴다."""
     # ── 보충 ──
     df["severity"] = df["flags"].map(lambda fs: "error" if any(SEVERITY[f] == "error" for f in fs)
                                      else "warn" if any(SEVERITY[f] == "warn" for f in fs)
@@ -271,7 +283,9 @@ def case2_rows(ops: pd.DataFrame, df: pd.DataFrame) -> pd.DataFrame:
     sm = _run_chunked(Q.sku_master, c2["sku_id"].unique())[["sku_id", "rep_barcode", "other_barcodes", "n_barcode"]]
     c2 = c2.merge(sm, on="sku_id", how="left")
     for c in ("stock_qty", "avail_qty", "incoming_qty", "outgoing_qty", "off_w1", "off_cum", "mfs_qty", "mfs_inbound_qty", "mfs_in_qty", "mfs_in_late_qty"):
-        c2[c] = pd.to_numeric(c2.get(c, 0), errors="coerce").fillna(0).astype("int64")
+        if c not in c2:          # 해당 원천 결과가 0건이면 열 자체가 없다 (예: 입고 예정 없음)
+            c2[c] = 0
+        c2[c] = pd.to_numeric(c2[c], errors="coerce").fillna(0).astype("int64")
     # 브랜드 표기는 시트 파일 기준(src_file)으로 맞춘다
     b2f = df.dropna(subset=["brand_nm"]).groupby("brand_nm")["src_file"].agg(lambda s: s.mode().iat[0])
     c2["src_file"] = c2["brand_nm"].map(b2f).fillna(c2["brand_nm"])
@@ -311,3 +325,27 @@ if __name__ == "__main__":
     out, summ = build(rows)
     out[[c for c in OUT_COLS if c in out]].to_csv(a.out, index=False, encoding="utf-8-sig")
     print(summ)
+
+
+def scm_quick(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+    """SCM 상태만 빠르게 다시 반영 — 매장×SKU 운영상태(storage_sku) + 상품 오프라인 판매 여부.
+    재고·판매·MFS 는 직전 전체 새로고침 값을 그대로 쓰고, 두 상태와 그에 따른 플래그·배분만 다시 계산한다.
+    (원천은 Databricks 사본이라 SCM-HUB 대비 30분~1시간 지연은 그대로)"""
+    df = df.copy()
+    df["flags"] = df["flags_text"].fillna("").map(lambda t: [f for f in t.split(" / ") if f and f not in (SCM_FLAG, OFFLINE_FLAG)])
+    fk = pd.to_numeric(df["fk_sku_id"], errors="coerce")
+    sid = pd.to_numeric(df["storage_id"], errors="coerce")
+    fks, sids = fk.dropna().astype("int64").unique(), sid.dropna().astype("int64").unique()
+    if len(fks) and len(sids):
+        ss = _run_chunked(Q.storage_sku, fks, sids)[["fk_sku_id", "storage_id", "storage_status"]]
+        key = dict(zip(zip(ss["fk_sku_id"].astype("int64"), ss["storage_id"].astype("int64")), ss["storage_status"]))
+        df["storage_status"] = [key.get((int(a), int(b))) if pd.notna(a) and pd.notna(b) else None for a, b in zip(fk, sid)]
+        off = _run_chunked(Q.sku_offline, fks)
+        offmap = dict(zip(off["fk_sku_id"].astype("int64"), off["offline_sale_enabled"].map(offline_yn_from)))
+        df["offline_yn"] = [offmap.get(int(a), "") if pd.notna(a) else "" for a in fk]
+    reg = fk.notna() & sid.notna()
+    for i in df.index[reg & (df["storage_status"] != "OPERATION_ENABLED")]:
+        df.at[i, "flags"].append(SCM_FLAG)
+    for i in df.index[df["offline_yn"] == "N"]:
+        df.at[i, "flags"].append(OFFLINE_FLAG)
+    return replenish(df)

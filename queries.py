@@ -199,6 +199,17 @@ WHERE {pairs}"""
 #    (sku_master 의 p.offline_sale_enabled).
 
 
+def sku_offline(fk_sku_ids: Iterable[int]) -> str:
+    """SKU 가 연결된 SCM-HUB product 행의 오프라인 판매 가능 여부 (빠른 SCM 새로고침용)."""
+    return f"""
+WITH {SPO}
+SELECT spo.fk_sku_id, p.offline_sale_enabled
+FROM spo
+JOIN ocmp.scm_hub.product_option po ON po._id = spo.fk_product_option_id
+JOIN ocmp.scm_hub.product p ON p._id = po.fk_product_id
+WHERE spo.fk_sku_id IN ({int_list(fk_sku_ids)})"""
+
+
 def mfs_stock(sku_ids: Iterable[str]) -> str:
     return f"""
 SELECT sku_id, CAST(mfs_stock_qty AS BIGINT) mfs_qty,
