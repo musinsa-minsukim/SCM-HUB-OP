@@ -7,11 +7,11 @@
 `scm-hub-operation-consign-ips-cache`, 비밀값 `consign-dbx-token`.
 
 ## 1) GitHub 저장소 만들기 + 첫 푸시
-1. GitHub 에서 **private** 저장소를 만든다 (예: `musinsa-minsukim/MOC-CONSIGN-IPS`). README·.gitignore 없이 빈 저장소로.
+1. GitHub 에서 **private** 저장소를 만든다 (예: `musinsa-minsukim/SCM-HUB-OP`). README·.gitignore 없이 빈 저장소로.
 2. 로컬 Git Bash:
 ```bash
 cd /c/Users/MUSINSA/musinsa-consign-ips
-git remote add origin https://github.com/musinsa-minsukim/MOC-CONSIGN-IPS.git
+git remote add origin https://github.com/musinsa-minsukim/SCM-HUB-OP.git
 git push -u origin main
 ```
 (첫 push 는 test 는 통과하고 deploy 는 아직 WIF 값이 없어 실패한다 — 정상. 3·4) 후 다시 실행.)
@@ -38,10 +38,10 @@ gcloud iam workload-identity-pools create github-pool --location=global --displa
 gcloud iam workload-identity-pools providers create-oidc github-provider \
   --location=global --workload-identity-pool=github-pool --display-name="GitHub provider" \
   --attribute-mapping="google.subject=assertion.sub,attribute.repository=assertion.repository" \
-  --attribute-condition="assertion.repository=='musinsa-minsukim/MOC-CONSIGN-IPS'" \
+  --attribute-condition="assertion.repository=='musinsa-minsukim/SCM-HUB-OP'" \
   --issuer-uri="https://token.actions.githubusercontent.com"
 gcloud iam service-accounts add-iam-policy-binding $DEPLOYER --role=roles/iam.workloadIdentityUser \
-  --member="principalSet://iam.googleapis.com/projects/${PNUM}/locations/global/workloadIdentityPools/github-pool/attribute.repository/musinsa-minsukim/MOC-CONSIGN-IPS"
+  --member="principalSet://iam.googleapis.com/projects/${PNUM}/locations/global/workloadIdentityPools/github-pool/attribute.repository/musinsa-minsukim/SCM-HUB-OP"
 echo "WIF_PROVIDER=projects/${PNUM}/locations/global/workloadIdentityPools/github-pool/providers/github-provider"
 echo "WIF_SERVICE_ACCOUNT=$DEPLOYER"
 ```
