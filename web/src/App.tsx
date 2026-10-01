@@ -70,12 +70,22 @@ export default function App() {
     return () => clearInterval(t);
   }, [status?.job?.running]);
 
+  // 새로고침은 서버가 끝까지 실행한 뒤 응답한다(Cloud Run CPU 제약). 기다리는 동안 버튼에 진행 표시.
+  const [busy, setBusy] = useState(false);
   const startRefresh = async () => {
-    await api("/refresh", { method: "POST" });
-    loadStatus();
+    setBusy(true);
+    try {
+      await api("/refresh", { method: "POST" });
+      setVer((v) => v + 1);
+    } catch (e: any) {
+      alert(String(e?.message || e));
+    } finally {
+      setBusy(false);
+      loadStatus();
+    }
   };
 
-  const running = status?.job?.running;
+  const running = busy || status?.job?.running;
   const Page = { brands: Brands, issues: Issues, matrix: Matrix, replenish: Replenish, uploads: Uploads, search: Search }[view];
   const title = NAV.find((n) => n.key === view)?.label;
 

@@ -118,10 +118,15 @@ def _run_refresh():
 
 @app.post("/api/refresh")
 def start_refresh(u: str = Depends(user)):
+    """새로고침을 요청 안에서 끝까지 실행한다(동기).
+    Cloud Run 은 응답을 보낸 뒤엔 CPU 를 거의 주지 않아서, 백그라운드 스레드로 돌리면 매우 느려지거나 멈춘다.
+    전체 브랜드 기준 약 1분, 요청 제한 시간(--timeout 900초) 안이다. 진행 상태는 /api/status 로 같이 보인다."""
     if _job["running"]:
         return {"started": False, "job": _job}
-    threading.Thread(target=_run_refresh, daemon=True).start()
-    return {"started": True}
+    _run_refresh()
+    if _job["error"]:
+        raise HTTPException(500, f"새로고침 실패: {_job['error']}")
+    return {"started": True, "done": True}
 
 
 @app.post("/api/cron/refresh")
