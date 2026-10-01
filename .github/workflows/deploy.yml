@@ -1,0 +1,86 @@
+name: Deploy to Cloud Run
+
+# 위탁 운영(consign-ips) 자동배포 — 대시보드(MOC-DASHBOARD-KICKS)와 같은 구조.
+# - 트리거: main 브랜치 push (또는 수동 실행).
+# - 게이트: test 잡(타입체크 + 프론트 빌드 + 파이썬 문법 + 매장명 매칭 회귀 테스트) 통과해야 deploy.
+# - 인증: Workload Identity Federation (장기 키 파일 없음).
+# - 배포: 매번 전체 설정으로 배포(멱등) → 첫 배포도 이 파이프라인이 한다. 수동 zip 업로드 불필요.
+# 최초 1회 설정: GITHUB-SETUP.md
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy-consign-ips
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install web deps
+        working-directory: web
+        run: npm install
+
+      - name: Typecheck + build (tsc --noEmit && vite build)
+        working-directory: web
+        run: npm run build
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Python syntax check
+        run: python -m compileall -q api.py dbx.py engine.py queries.py refresh.py sheets.py storematch.py serve.py
+
+      - name: Store-name matching regression test (원천 접속 없음)
+        run: python test_storematch.py
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud (WIF)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+        with:
+          install_components: beta
+
+      - name: Deploy to Cloud Run
+        env:
+          PROJECT: ${{ vars.GCP_PROJECT }}
+          REGION: ${{ vars.GCP_REGION }}
+          SERVICE: ${{ vars.CLOUD_RUN_SERVICE }}
+          RUNTIME_SA: ${{ vars.RUNTIME_SERVICE_ACCOUNT }}
+          TARGET_MDS: ${{ vars.TARGET_MDS }}
+        run: |
+          gcloud beta run deploy "$SERVICE" --source . --project "$PROJECT" --region "$REGION" --quiet \
+            --service-account "$RUNTIME_SA" --no-allow-unauthenticated --iap \
+            --memory 2Gi --cpu 1 --min-instances 0 --max-instances 2 --timeout 900 \
+            --set-env-vars "^;^DATABRICKS_HOST=musinsa-data-ws.cloud.databricks.com;DATABRICKS_HTTP_PATH=/sql/1.0/warehouses/c0ee970a9c3ed562;TARGET_MDS=${TARGET_MDS};CACHE_DIR=/mnt/cache;ALLOWED_DOMAIN=musinsa.com" \
+            --set-secrets DATABRICKS_TOKEN=consign-dbx-token:latest \
+            --add-volume name=cache,type=cloud-storage,bucket=${PROJECT}-consign-ips-cache \
+            --add-volume-mount volume=cache,mount-path=/mnt/cache
+
+      - name: Show service URL
+        run: |
+          gcloud run services describe "${{ vars.CLOUD_RUN_SERVICE }}" \
+            --project "${{ vars.GCP_PROJECT }}" --region "${{ vars.GCP_REGION }}" --format="value(status.url)"

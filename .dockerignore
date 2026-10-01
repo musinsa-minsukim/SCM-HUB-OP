@@ -1,0 +1,12 @@
+.venv/
+cache/
+web/node_modules/
+web/dist/
+__pycache__/
+*.csv
+*.log
+*.env
+.env*
+secrets*.toml
+service-account*.json
+credentials*.json

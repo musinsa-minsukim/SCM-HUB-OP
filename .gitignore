@@ -1,0 +1,19 @@
+# 시크릿 (절대 커밋 금지)
+*.env
+.env*
+secrets*.toml
+service-account*.json
+credentials*.json
+token*.json
+
+# 데이터·출력
+cache/
+*.csv
+
+# Python / Node
+.venv/
+__pycache__/
+*.pyc
+web/node_modules/
+web/dist/
+*.log
