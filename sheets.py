@@ -15,8 +15,10 @@ HTTP 는 requests(AuthorizedSession) 로 한다 — httplib2 는 사내 프록�
 """
 from __future__ import annotations
 
+import json
 import os
 import re
+import time
 from dataclasses import dataclass, field, asdict
 
 import pandas as pd
@@ -69,12 +71,56 @@ def _session():
     return AuthorizedSession(creds)
 
 
+# Sheets API 읽기 한도 = 서비스 계정당 분당 60회. 파일마다 2회(탭 목록 + 값) × 50여 개를 연달아 부르면
+# 이름순 뒤쪽 파일(포기무디·포른른 등)이 429 로 '읽기 실패' 가 된다 (2026-10-02).
+# → ① 429·5xx 는 기다렸다 재시도 ② 수정 시각이 그대로인 파일은 지난번 읽은 결과를 재사용(호출 자체를 줄임).
+RETRY_STATUS = {429, 500, 502, 503, 504}
+SHEET_CACHE = os.path.join(os.environ.get("CACHE_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache")),
+                           "sheet_cache")
+
+
+def _get(sess, url, params=None, tries: int = 6):
+    wait = 5.0
+    for i in range(tries):
+        r = sess.get(url, params=params)
+        if r.status_code not in RETRY_STATUS or i == tries - 1:
+            r.raise_for_status()
+            return r
+        ra = r.headers.get("Retry-After")
+        time.sleep(float(ra) if ra and ra.isdigit() else wait)
+        wait = min(wait * 2, 60.0)
+    return r
+
+
+def _cache_load(file_id: str, modified: str):
+    try:
+        with open(os.path.join(SHEET_CACHE, f"{file_id}.json"), encoding="utf-8") as f:
+            meta = json.load(f)
+        if meta.get("modified") != modified:
+            return None
+        df = pd.read_pickle(os.path.join(SHEET_CACHE, f"{file_id}.pkl")) if meta.get("rows") else pd.DataFrame()
+        return df, meta
+    except Exception:
+        return None
+
+
+def _cache_save(file_id: str, df: pd.DataFrame, st: "FileStatus"):
+    try:
+        os.makedirs(SHEET_CACHE, exist_ok=True)
+        if len(df):
+            df.to_pickle(os.path.join(SHEET_CACHE, f"{file_id}.pkl"))   # 값 타입(빈 칸=None 등) 그대로 보존
+        with open(os.path.join(SHEET_CACHE, f"{file_id}.json"), "w", encoding="utf-8") as f:
+            json.dump(asdict(st), f, ensure_ascii=False)
+    except Exception:
+        pass
+
+
 def list_brand_files(sess) -> list[dict]:
     out, token = [], None
     q = (f"'{BRAND_FOLDER_ID}' in parents and trashed = false "
          "and mimeType = 'application/vnd.google-apps.spreadsheet'")
     while True:
-        r = sess.get("https://www.googleapis.com/drive/v3/files", params={
+        r = _get(sess, "https://www.googleapis.com/drive/v3/files", params={
             "q": q, "pageSize": 200, "pageToken": token or "",
             "fields": "nextPageToken, files(id,name,modifiedTime,owners(emailAddress),webViewLink)",
             "supportsAllDrives": "true", "includeItemsFromAllDrives": "true"})
@@ -169,24 +215,32 @@ def read_all(target_brand_names: set[str] | None = None) -> tuple[pd.DataFrame, 
         elif target_brand_names is not None and brand not in target_brand_names:
             st.status, st.detail = "대상 아님", "담당 MD 브랜드 아님"
         else:
+            hit = _cache_load(f["id"], st.modified) if st.modified else None
+            if hit is not None:   # 지난번 이후 수정 없음 → 다시 읽지 않는다
+                df, m = hit
+                for k in ("status", "detail", "qty_header", "rows", "columns"):
+                    setattr(st, k, m.get(k, getattr(st, k)))
+                if len(df):
+                    frames.append(df)
+                statuses.append(asdict(st))
+                continue
             try:
-                meta = sess.get(f"https://sheets.googleapis.com/v4/spreadsheets/{f['id']}",
-                                params={"fields": "sheets.properties.title"})
-                meta.raise_for_status()
+                meta = _get(sess, f"https://sheets.googleapis.com/v4/spreadsheets/{f['id']}",
+                            params={"fields": "sheets.properties.title"})
                 tabs = [s["properties"]["title"] for s in meta.json().get("sheets", [])]
                 tab = next((t for t in tabs if t.startswith(TAB_PREFIX)), None)
                 if not tab:
                     st.status, st.detail = "탭 없음", f"'{TAB_PREFIX}…' 탭 없음"
                 else:
-                    r = sess.get(f"https://sheets.googleapis.com/v4/spreadsheets/{f['id']}/values/"
-                                 f"'{tab}'!A1:BZ5000",
-                                 params={"valueRenderOption": "UNFORMATTED_VALUE"})
-                    r.raise_for_status()
+                    r = _get(sess, f"https://sheets.googleapis.com/v4/spreadsheets/{f['id']}/values/"
+                                   f"'{tab}'!A1:BZ5000",
+                             params={"valueRenderOption": "UNFORMATTED_VALUE"})
                     df = parse_values(r.json().get("values", []), st)
                     if len(df):
                         df["src_file"], df["file_id"] = brand, f["id"]
                         df["brand_in"] = brand   # 브랜드 = 시트 파일 브랜드
                         frames.append(df)
+                    _cache_save(f["id"], df, st)
             except Exception as e:  # 한 브랜드 실패가 전체를 막지 않게
                 st.status, st.detail = "읽기 실패", str(e)[:300]
         statuses.append(asdict(st))
