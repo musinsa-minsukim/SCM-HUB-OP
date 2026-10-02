@@ -45,7 +45,7 @@ export default function Brands({ dark, nav }: PageProps) {
     colNum("warns", "확인", "int"),
     colNum("unregistered", "운영중 전환 필요", "int"),
     colNum("multi_barcode", "바코드 2개+", "int"),
-    colNum("offline_n", "오프라인 판매 N", "int", { headerTooltip: "비제스트 오프라인 판매 여부가 Y 가 아닌 행(보충 발주 불가)" }),
+    colNum("offline_n", "오프라인 판매 N", "int", { headerTooltip: "SCM-HUB 오프라인 판매 여부가 Y 가 아닌 행(보충 발주 불가). 비제스트 N + SCM 미반영 합계" }),
     colNum("fixed_pcs", "고정 운영 수량", "int"),
     colNum("stock_qty", "매장 현재고", "int"),
     colNum("incoming_qty", "이동중 재고", "int"),

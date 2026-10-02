@@ -187,7 +187,7 @@ def brands(u: str = Depends(user)):
         "return_cand": g["return_candidate"].apply(lambda s: int((s.astype(str) == "True").sum())),
         "unregistered": g["flags_text"].apply(lambda s: int(s.str.contains("SCM 운영중 전환 필요").sum())),
         "multi_barcode": g["flags_text"].apply(lambda s: int(s.str.contains("바코드 2개").sum())),
-        "offline_n": gall["flags_text"].apply(lambda s: int(s.str.contains("비제스트 오프라인 판매 N").sum())),
+        "offline_n": gall["flags_text"].apply(lambda s: int(s.str.contains("비제스트 오프라인 판매 N|SCM 오프라인 판매 미반영").sum())),
     }).reset_index().rename(columns={"src_file": "brand"})
     files = pd.DataFrame(meta.get("files", []))
     if len(files):
@@ -275,7 +275,7 @@ CSV_COLS = {
     "mfs_in_date": "MFS 입고 예정일", "mfs_in_late_qty": "MFS 입고 지연(7일+)",
     "off_cum": "누적 판매", "off_w1": "7일 판매", "avail_qty": "판매가능", "off_4w": "매장 판매 4주", "mfs_qty": "MFS 재고", "need_qty": "보충 필요",
     "alloc_qty": "MFS 배분", "short_qty": "부족", "over_qty": "과잉", "storage_status": "SCM 매장 운영",
-    "offline_yn": "오프라인 판매(비제스트)", "severity": "검증", "flags_text": "확인 사항", "src_file": "원본 파일", "src_row": "원본 행",
+    "bz_offline_yn": "오프라인 판매(비제스트)", "offline_yn": "오프라인 판매(SCM-HUB)", "severity": "검증", "flags_text": "확인 사항", "src_file": "원본 파일", "src_row": "원본 행",
 }
 
 
@@ -411,7 +411,8 @@ def moves_csv(ret: str = "all", brand: str | None = None, store: str | None = No
 
 
 def _offline_goods(brand: str | None, md: str | None) -> pd.DataFrame:
-    """보충 발주 조건 ① 미충족 — 비제스트 오프라인 판매 여부가 Y 가 아닌 상품(UID). 시트 운영리스트에 있는 상품만."""
+    """보충 발주 조건 ① 미충족 — SCM-HUB 오프라인 판매 여부가 Y 가 아닌 상품(UID). 시트 운영리스트에 있는 상품만.
+    비제스트가 이미 Y 면 'SCM 반영 대기', 아니면 '비제스트 Y 전환'."""
     df, _ = snap()
     df = _filter(df, brand, md=md)
     x = df[(df["severity"] != "error") & (df["is_dup"].astype(str) != "True")
@@ -421,9 +422,11 @@ def _offline_goods(brand: str | None, md: str | None) -> pd.DataFrame:
     x = x.assign(goods_no=pd.to_numeric(x["goods_no"], errors="coerce").astype("Int64").astype(str))
     g = x.groupby(["src_file", "goods_no"]).agg(
         product_name=("product_name", "first"), offline_yn=("offline_yn", "first"),
+        bz_offline_yn=("bz_offline_yn", "first"), bz_offline_ut=("bz_offline_ut", "first"),
         stores=("store_name", "nunique"), skus=("sku_id", "nunique"),
         fixed_qty=("fixed_qty", "sum"), stock_qty=("stock_qty", "sum"),
         need_qty=("need_qty", "sum"), off_cum=("off_cum", "sum"), off_w1=("off_w1", "sum")).reset_index()
+    g["todo"] = g["bz_offline_yn"].eq("Y").map({True: "SCM 반영 대기", False: "비제스트 Y 전환"})
     return g.sort_values(["need_qty", "off_w1"], ascending=False)
 
 
@@ -436,7 +439,8 @@ def offline_goods(brand: str | None = None, md: str | None = None, u: str = Depe
 @app.get("/api/offline_goods.csv")
 def offline_goods_csv(brand: str | None = None, md: str | None = None, u: str = Depends(user)):
     g = _offline_goods(brand, md)
-    cols = {"goods_no": "UID", "src_file": "브랜드", "product_name": "상품명", "offline_yn": "현재 오프라인 판매 여부",
+    cols = {"goods_no": "UID", "src_file": "브랜드", "product_name": "상품명", "todo": "할 일",
+            "bz_offline_yn": "비제스트 오프라인 판매", "bz_offline_ut": "비제스트 변경 시각", "offline_yn": "SCM-HUB 오프라인 판매",
             "stores": "운영 매장 수", "skus": "SKU 수", "fixed_qty": "고정 운영 수량", "stock_qty": "매장 현재고",
             "need_qty": "보충 필요", "off_cum": "누적 판매", "off_w1": "7일 판매"}
     return _csv(g[[c for c in cols if c in g]].rename(columns=cols), "offline_goods_yn.csv")

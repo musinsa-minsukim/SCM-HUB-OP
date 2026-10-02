@@ -69,6 +69,9 @@ export function CsvButton({ params }: { params: Record<string, any> }) {
 }
 
 // 상품 행 공통 컬럼
+const ynStyle = ((p: any) => (!p.data || p.data.__muTotal || !p.value ? null
+  : p.value === "Y" ? { color: "var(--ratio-up)", fontWeight: 700 } : { color: "var(--ratio-down)", fontWeight: 700 })) as any;
+
 export const COL = {
   brand: colText("src_file", "브랜드", { pinned: "left", minWidth: 100 }),
   store: colText("store_name", "매장", { minWidth: 140 }),
@@ -103,10 +106,13 @@ export const COL = {
   short: { ...colNum("short_qty", "부족", "int"), cellStyle: (p: any) => (p.value > 0 ? { color: "var(--ratio-down)", fontWeight: 600, textAlign: "right" } : { textAlign: "right" }) } as ColDef,
   over: colNum("over_qty", "과잉", "int"),
   src: colText("src_row", "원본 행", { minWidth: 80 }),
+  bzOffline: {
+    ...colText("bz_offline_yn", "오프라인 판매(비제스트)", { minWidth: 120, headerTooltip: "비제스트 원장의 상품(UID) 오프라인 판매 여부. 여기서 바꾼 값이 SCM-HUB 로 넘어간다(몇 시간~하루 걸리기도 함)" }),
+    cellStyle: ynStyle,
+  } as ColDef,
   offline: {
-    ...colText("offline_yn", "오프라인 판매", { minWidth: 96, headerTooltip: "비제스트 상품(UID) 오프라인 판매 여부 (SCM-HUB 상품 offline_sale_enabled). Y 여야 보충 발주 가능 (조건 ①), 조건 ② = SCM 매장 운영중" }),
-    cellStyle: ((p: any) => (!p.data || p.data.__muTotal ? null
-      : p.value === "Y" ? { color: "var(--ratio-up)", fontWeight: 700 } : { color: "var(--ratio-down)", fontWeight: 700 })) as any,
+    ...colText("offline_yn", "오프라인 판매(SCM)", { minWidth: 120, headerTooltip: "SCM-HUB 상품(UID) 오프라인 판매 여부 — 실제로 보충 발주를 막는 값. Y 여야 보충 발주 가능 (조건 ①), 조건 ② = SCM 매장 운영중. 비제스트가 Y 인데 여기가 N 이면 아직 안 넘어온 것" }),
+    cellStyle: ynStyle,
   } as ColDef,
   storeIn: colText("store_in", "시트 매장명", { minWidth: 140 }),
   storeMatch: colText("store_match_note", "매장 매칭", { minWidth: 200, headerTooltip: "자동 매칭이면 '시트 표기 → 매장', 후보 여럿이면 후보 목록" }),

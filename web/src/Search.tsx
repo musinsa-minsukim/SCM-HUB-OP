@@ -33,7 +33,7 @@ export default function Search({ dark, preset }: PageProps) {
             sub="바코드로 검색하면 추가 바코드까지 찾습니다. 재고·판매는 모든 바코드를 SKU 로 합친 값입니다."
             right={loading ? <Spinner /> : null} />
           {ready && <TotalGrid dark={dark} rows={rows} height={620}
-            columns={[COL.brand, COL.store, ...PRODUCT_COLS(), COL.sev, COL.offline, COL.barcode, COL.otherBc,
+            columns={[COL.brand, COL.store, ...PRODUCT_COLS(), COL.sev, COL.bzOffline, COL.offline, COL.barcode, COL.otherBc,
               COL.fixed, COL.stock, COL.incoming, COL.outgoing, COL.mfs, COL.mfsIn, COL.mfsInDate, COL.mfsLate, COL.offCum, COL.off1, COL.avail, COL.off4, COL.offAll, COL.onl1,
               COL.need, COL.alloc, COL.scm, COL.flags, COL.src]} />}
         </CardBody>

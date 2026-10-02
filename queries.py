@@ -210,6 +210,16 @@ JOIN ocmp.scm_hub.product p ON p._id = po.fk_product_id
 WHERE spo.fk_sku_id IN ({int_list(fk_sku_ids)})"""
 
 
+def bizest_offline(goods_nos: Iterable[int]) -> str:
+    """비제스트 원장의 상품(UID) 오프라인 판매 여부 — musinsa.stock.product.for_offline_sale (1 = Y).
+    SCM-HUB product.offline_sale_enabled 는 이 값이 넘어간 사본이다. 넘어가는 데 몇 시간~하루 걸리는 경우가 있어
+    (2026-10-01 실측: 비제스트 14:33 변경 → SCM-HUB 다음날 10:33) 둘을 나란히 보여 준다.
+    ut 는 KST 값이 UTC 표기로 저장돼 있다."""
+    return f"""
+SELECT CAST(id AS BIGINT) goods_no, MAX(for_offline_sale) bz_offline, MAX(ut) bz_offline_ut
+FROM musinsa.stock.product WHERE id IN ({int_list(goods_nos)}) GROUP BY id"""
+
+
 def mfs_stock(sku_ids: Iterable[str]) -> str:
     return f"""
 SELECT sku_id, CAST(mfs_stock_qty AS BIGINT) mfs_qty,

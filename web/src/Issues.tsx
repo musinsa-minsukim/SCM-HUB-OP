@@ -47,7 +47,9 @@ const HELP: Record<string, string> = {
   "글로벌 SKU(GLOBAL_3P)": "글로벌 위탁 SKU — 국내 오프라인용 SKU 인지 확인",
   "바코드 없음": "SCM-HUB 에 활성 바코드가 없음",
   "바코드 2개 이상": "재고·판매는 SKU 로 합산됨. 매장 라벨 확인용 참고",
-  "비제스트 오프라인 판매 N": "상품(UID) 오프라인 판매 여부가 Y 가 아님 → 보충 발주 불가, MFS 배분 0. 비제스트에서 Y 로 바꿔야 함(업로드 파일 ③ 목록)",
+  "비제스트 오프라인 판매 N": "비제스트·SCM-HUB 모두 오프라인 판매 N → 보충 발주 불가, MFS 배분 0. 비제스트에서 Y 로 바꿔야 함(업로드 파일 ③ 목록)",
+  "SCM 오프라인 판매 미반영": "비제스트는 Y 인데 SCM-HUB 는 아직 N → 보충 발주 불가, MFS 배분 0. 넘어오길 기다리고, 하루 넘게 그대로면 SCM-HUB 문의",
+  "오프라인 판매 비제스트 N·SCM Y": "비제스트는 N 인데 SCM-HUB 는 Y (참고). 비제스트에서 N 으로 바꾼 직후일 수 있음",
   "시트에 없음 · SCM 운영중": "CASE2 — 운영리스트에 없는데 SCM-HUB 에서 운영중. 업로드 파일 ① 에 '미운영'으로 담김",
 };
 
@@ -100,7 +102,7 @@ export default function Issues({ dark, preset }: PageProps) {
             sub="CASE1 = 브랜드 운영리스트에 있는 조합(정상 상태 운영중) · CASE2 = 리스트에 없는데 실제 운영중인 조합(정상 상태 미운영). 상태가 정상 상태와 다르면 빨강. 원본 행 = 브랜드 시트 행 번호." right={loading ? <Spinner /> : null} />
           {/* 재고·판매는 브랜드 현황과 같은 6개 지표 · 같은 순서 */}
           <TotalGrid dark={dark} rows={data?.rows ?? []} height={600}
-            columns={[CASE, COL.brand, COL.store, ...PRODUCT_COLS(), ACTUAL, EXPECTED, COL.offline, COL.sev, COL.src, COL.flags, COL.storeIn, COL.storeMatch,
+            columns={[CASE, COL.brand, COL.store, ...PRODUCT_COLS(), ACTUAL, EXPECTED, COL.bzOffline, COL.offline, COL.sev, COL.src, COL.flags, COL.storeIn, COL.storeMatch,
               COL.fixed, COL.stock, COL.incoming, COL.outgoing, COL.mfs, COL.mfsIn, COL.mfsInDate, COL.mfsLate, COL.offCum, COL.off1,
               COL.barcode, COL.otherBc, SCMCODE]} />
         </CardBody>

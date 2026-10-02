@@ -50,8 +50,12 @@ const offCols: ColDef[] = [
   { ...COL.goods, pinned: "left", minWidth: 100 } as ColDef,
   colText("src_file", "브랜드", { minWidth: 100 }),
   colText("product_name", "상품명", { minWidth: 220 }),
-  { ...colText("offline_yn", "현재 오프라인 판매", { minWidth: 110 }),
-    cellStyle: ((p: any) => (!p.data || p.data.__muTotal ? null : { color: "var(--ratio-down)", fontWeight: 700 })) as any },
+  { ...colText("todo", "할 일", { minWidth: 120, headerTooltip: "비제스트 Y 전환 = 비제스트에서 Y 로 바꿔야 함 / SCM 반영 대기 = 비제스트는 이미 Y, SCM-HUB 로 넘어오길 기다림(하루 넘으면 문의)" }),
+    cellStyle: ((p: any) => (!p.data || p.data.__muTotal ? null
+      : p.value === "SCM 반영 대기" ? { color: "var(--ratio-up)", fontWeight: 700 } : { color: "var(--ratio-down)", fontWeight: 700 })) as any },
+  COL.bzOffline,
+  colText("bz_offline_ut", "비제스트 변경 시각", { minWidth: 130 }),
+  COL.offline,
   colNum("stores", "운영 매장 수", "int"),
   colNum("skus", "SKU 수", "int"),
   colNum("fixed_qty", "고정 운영 수량", "int"),
@@ -116,8 +120,8 @@ export default function Uploads({ dark, preset }: PageProps) {
 
       <Card>
         <CardBody>
-          <SectionTitle title={`③ 비제스트 오프라인 판매 Y 전환 필요 ${num(off.data?.total ?? 0)}개 상품`}
-            sub="보충 발주 조건 ① — 비제스트 상품(UID) 오프라인 판매 여부가 Y 여야 발주가 됩니다. 운영리스트에 있는데 Y 가 아닌 상품입니다. 이 상품들은 MFS 배분이 0 이라 ② 파일에 나오지 않습니다(보충 필요 순 정렬)."
+          <SectionTitle title={`③ 오프라인 판매 Y 전환 필요 ${num(off.data?.total ?? 0)}개 상품`}
+            sub="보충 발주 조건 ① — SCM-HUB 상품(UID) 오프라인 판매 여부가 Y 여야 발주가 됩니다. 운영리스트에 있는데 Y 가 아닌 상품입니다. '할 일'이 비제스트 Y 전환이면 비제스트에서 바꾸고, SCM 반영 대기면 이미 바꾼 것이라 넘어오길 기다리면 됩니다. 이 상품들은 MFS 배분이 0 이라 ② 파일에 나오지 않습니다(보충 필요 순 정렬)."
             right={<div className="flex items-center gap-2">{off.loading && <Spinner />}
               <DlButton href={"/api/offline_goods.csv" + qs(offQ)} label="상품 목록" /></div>} />
           <TotalGrid dark={dark} rows={off.data?.rows ?? []} columns={offCols} height={420} />

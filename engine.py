@@ -42,6 +42,7 @@ SEVERITY = {  # error = 보충 계산에서 제외, warn = 계산은 하되 표�
     "매장명 확인 불가": "error", "매장명 후보 여럿": "error", "매장명 자동 매칭": "info", "중복 행(같은 매장·SKU)": "warn", "고정 수량 비어 있음/숫자 아님": "error",
     "위탁 SKU 아님": "error", "브랜드 불일치": "warn", "담당 MD 브랜드 아님": "warn",
     "SCM 운영중 전환 필요": "warn", "비제스트 오프라인 판매 N": "warn",
+    "SCM 오프라인 판매 미반영": "warn", "오프라인 판매 비제스트 N·SCM Y": "info",
     "글로벌 SKU(GLOBAL_3P)": "warn", "바코드 없음": "warn", "바코드 2개 이상": "info",
 }
 
@@ -110,11 +111,14 @@ def build(rows: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     flag(df["fk_sku_id"].notna() & (df["n_barcode"] == 0), "바코드 없음")
     flag(df["n_barcode"] > 1, "바코드 2개 이상")
 
-    # 보충 발주 조건 ①: 비제스트 상품(UID) 오프라인 판매 여부 = Y
-    #   = SKU 가 연결된 SCM-HUB product 행의 offline_sale_enabled (True → Y)
+    # 보충 발주 조건 ①: 상품(UID) 오프라인 판매 여부 = Y
+    #   발주를 실제로 막는 값 = SKU 가 연결된 SCM-HUB product 행의 offline_sale_enabled (True → Y) → offline_yn
+    #   비제스트 원장 값(stock.product.for_offline_sale) → bz_offline_yn. 둘이 다르면 플래그로 구분.
     en = df["offline_sale_enabled"].map(offline_yn_from)
     df["offline_yn"] = en.where(df["fk_sku_id"].notna(), "")
-    flag((df["offline_yn"] == "N"), "비제스트 오프라인 판매 N")
+    df = with_bizest_offline(df)
+    for f, m in offline_flags(df).items():
+        flag(m, f)
 
     tb = dbx.run_df(Q.target_brands(MD_IDS, EXTRA_BRANDS))
     tb_keys = set(zip(tb["com_id"], tb["brand"]))
@@ -176,8 +180,34 @@ def build(rows: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     return replenish(df)
 
 
-OFFLINE_FLAG = "비제스트 오프라인 판매 N"
+OFFLINE_FLAG = "비제스트 오프라인 판매 N"          # 비제스트 N(→ SCM 도 N): 비제스트에서 Y 로 바꿔야 함
+SYNC_FLAG = "SCM 오프라인 판매 미반영"              # 비제스트 Y 인데 SCM-HUB 는 아직 N: 넘어오길 기다리거나 SCM-HUB 문의
+REV_FLAG = "오프라인 판매 비제스트 N·SCM Y"        # 반대로 어긋남(참고)
 SCM_FLAG = "SCM 운영중 전환 필요"
+OFFLINE_FLAGS = (OFFLINE_FLAG, SYNC_FLAG, REV_FLAG)
+
+
+def with_bizest_offline(df: pd.DataFrame) -> pd.DataFrame:
+    """비제스트 원장 오프라인 판매 여부(bz_offline_yn)·변경 시각(bz_offline_ut, KST)을 UID 기준으로 붙인다."""
+    df = df.drop(columns=["bz_offline_yn", "bz_offline_ut"], errors="ignore")
+    g = pd.to_numeric(df["goods_no"], errors="coerce")
+    gnos = g.dropna().astype("int64").unique()
+    bz = _run_chunked(Q.bizest_offline, gnos) if len(gnos) else pd.DataFrame()
+    if bz.empty:
+        bz = pd.DataFrame({"goods_no": pd.Series(dtype="int64"), "bz_offline": [], "bz_offline_ut": []})
+    ynmap = dict(zip(bz["goods_no"].astype("int64"), bz["bz_offline"].map(offline_yn_from)))
+    utmap = dict(zip(bz["goods_no"].astype("int64"),
+                     pd.to_datetime(bz["bz_offline_ut"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M")))
+    df["bz_offline_yn"] = [ynmap.get(int(a), "") if pd.notna(a) else "" for a in g]
+    df["bz_offline_ut"] = [utmap.get(int(a), "") if pd.notna(a) else "" for a in g]
+    return df
+
+
+def offline_flags(df: pd.DataFrame) -> dict:
+    scm, bz = df["offline_yn"], df["bz_offline_yn"]
+    return {OFFLINE_FLAG: (scm == "N") & (bz != "Y"),
+            SYNC_FLAG: (scm == "N") & (bz == "Y"),
+            REV_FLAG: (scm == "Y") & (bz == "N")}
 
 
 def offline_yn_from(v) -> str:
@@ -332,7 +362,7 @@ def scm_quick(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     재고·판매·MFS 는 직전 전체 새로고침 값을 그대로 쓰고, 두 상태와 그에 따른 플래그·배분만 다시 계산한다.
     (원천은 Databricks 사본이라 SCM-HUB 대비 30분~1시간 지연은 그대로)"""
     df = df.copy()
-    df["flags"] = df["flags_text"].fillna("").map(lambda t: [f for f in t.split(" / ") if f and f not in (SCM_FLAG, OFFLINE_FLAG)])
+    df["flags"] = df["flags_text"].fillna("").map(lambda t: [f for f in t.split(" / ") if f and f != SCM_FLAG and f not in OFFLINE_FLAGS])
     fk = pd.to_numeric(df["fk_sku_id"], errors="coerce")
     sid = pd.to_numeric(df["storage_id"], errors="coerce")
     fks, sids = fk.dropna().astype("int64").unique(), sid.dropna().astype("int64").unique()
@@ -346,6 +376,8 @@ def scm_quick(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     reg = fk.notna() & sid.notna()
     for i in df.index[reg & (df["storage_status"] != "OPERATION_ENABLED")]:
         df.at[i, "flags"].append(SCM_FLAG)
-    for i in df.index[df["offline_yn"] == "N"]:
-        df.at[i, "flags"].append(OFFLINE_FLAG)
+    df = with_bizest_offline(df)
+    for f, m in offline_flags(df).items():
+        for i in df.index[m]:
+            df.at[i, "flags"].append(f)
     return replenish(df)
