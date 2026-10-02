@@ -114,6 +114,7 @@ export const COL = {
     ...colText("offline_yn", "오프라인 판매(SCM)", { minWidth: 120, headerTooltip: "SCM-HUB 상품(UID) 오프라인 판매 여부 — 실제로 보충 발주를 막는 값. Y 여야 보충 발주 가능 (조건 ①), 조건 ② = SCM 매장 운영중. 비제스트가 Y 인데 여기가 N 이면 아직 안 넘어온 것" }),
     cellStyle: ynStyle,
   } as ColDef,
+  otherGoods: colText("other_goods", "다른 연결 UID", { minWidth: 120, headerTooltip: "SCM-HUB 에서 이 SKU 에 함께 연결된 다른 UID. 판매중·오프라인 판매 가능한 UID 를 대표로 골랐다" }),
   storeIn: colText("store_in", "시트 매장명", { minWidth: 140 }),
   storeMatch: colText("store_match_note", "매장 매칭", { minWidth: 200, headerTooltip: "자동 매칭이면 '시트 표기 → 매장', 후보 여럿이면 후보 목록" }),
 };

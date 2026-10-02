@@ -270,7 +270,7 @@ def rows(brand: str | None = None, store: str | None = None, severity: str | Non
 
 CSV_COLS = {
     "brand_in": "브랜드", "store_name": "매장", "sku_id": "SKU ID", "goods_no": "UID",
-    "product_name": "상품명", "option_name": "옵션명", "rep_barcode": "대표 바코드", "other_barcodes": "추가 바코드",
+    "product_name": "상품명", "option_name": "옵션명", "other_goods": "다른 연결 UID", "rep_barcode": "대표 바코드", "other_barcodes": "추가 바코드",
     "fixed_qty": "고정 운영 수량", "stock_qty": "매장 현재고", "incoming_qty": "이동중 재고", "outgoing_qty": "매장 반납 예정", "mfs_qty": "MFS 재고", "mfs_in_qty": "MFS 입고 예정",
     "mfs_in_date": "MFS 입고 예정일", "mfs_in_late_qty": "MFS 입고 지연(7일+)",
     "off_cum": "누적 판매", "off_w1": "7일 판매", "avail_qty": "판매가능", "off_4w": "매장 판매 4주", "mfs_qty": "MFS 재고", "need_qty": "보충 필요",

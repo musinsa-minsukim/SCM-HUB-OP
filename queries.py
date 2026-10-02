@@ -19,12 +19,25 @@ from typing import Iterable
 KST_TODAY = "to_date(from_utc_timestamp(current_timestamp(), 'Asia/Seoul'))"
 
 # sku → product_option 1건 (ACTIVE 우선). 없으면 조인 시 ~5% 부풀려진다 (scm-hub 스킬 규칙).
+# SKU → 상품 옵션 1건. 한 SKU 에 ACTIVE 연결이 여러 상품(UID)인 경우가 있다(2026-10-02 실측: 대상 4,636 SKU 중 20개).
+#   예) S2601130000419: 3417694(판매중, 원래 연결) + 3862861(등록중, 2026-04 추가) → 최신순이면 3862861 로 잘못 잡힘.
+#   매장 실판매 UID(moss.order_option.goods_no)와 맞춰 본 우선순위:
+#   ① 연결 ACTIVE ② 상품 판매상태 ACTIVE(판매중지·등록중 뒤로) ③ 오프라인 판매 가능 ④ 최근 연결.
+#   n_goods/all_goods = ACTIVE 로 연결된 서로 다른 UID 수·목록 (화면에서 '다른 UID' 로 확인용).
 SPO = """spo AS (
-  SELECT fk_sku_id, fk_product_option_id FROM (
-    SELECT fk_sku_id, fk_product_option_id,
-      ROW_NUMBER() OVER (PARTITION BY fk_sku_id
-        ORDER BY CASE WHEN mapping_type='ACTIVE' THEN 0 ELSE 1 END, updated_at DESC) rn
-    FROM ocmp.scm_hub.sku_product_option) WHERE rn = 1)"""
+  SELECT fk_sku_id, fk_product_option_id, n_goods, all_goods FROM (
+    SELECT x.fk_sku_id, x.fk_product_option_id,
+      size(collect_set(CASE WHEN x.mapping_type='ACTIVE' THEN p.product_no END) OVER (PARTITION BY x.fk_sku_id)) n_goods,
+      concat_ws(',', sort_array(collect_set(CASE WHEN x.mapping_type='ACTIVE' THEN CAST(p.product_no AS STRING) END)
+                                OVER (PARTITION BY x.fk_sku_id))) all_goods,
+      ROW_NUMBER() OVER (PARTITION BY x.fk_sku_id
+        ORDER BY CASE WHEN x.mapping_type='ACTIVE' THEN 0 ELSE 1 END,
+                 CASE WHEN p.sales_status='ACTIVE' THEN 0 ELSE 1 END,
+                 CASE WHEN p.offline_sale_enabled THEN 0 ELSE 1 END,
+                 x.updated_at DESC) rn
+    FROM ocmp.scm_hub.sku_product_option x
+    LEFT JOIN ocmp.scm_hub.product_option po ON po._id = x.fk_product_option_id
+    LEFT JOIN ocmp.scm_hub.product p ON p._id = po.fk_product_id) WHERE rn = 1)"""
 
 
 def lit(v) -> str:
@@ -97,7 +110,7 @@ g AS (
 SELECT s.sku_id, s.fk_sku_id, s.sku_name, s.sku_style_no, s.purchase_type, s.consignment_type,
        s.operation_status, s.regular_price,
        p.product_no goods_no, p.product_name, po.option_name, po.option_code,
-       p.offline_sale_enabled, p.platform product_platform,
+       p.offline_sale_enabled, p.platform product_platform, spo.n_goods, spo.all_goods,
        g.brand_nm, g.com_id, g.brand, g.small_nm, g.normal_price, g.img,
        bca.rep_barcode, bca.other_barcodes, COALESCE(bca.n_barcode, 0) n_barcode,
        COALESCE(bca.n_barcode_disabled, 0) n_barcode_disabled

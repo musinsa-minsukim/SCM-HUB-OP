@@ -44,6 +44,7 @@ SEVERITY = {  # error = 보충 계산에서 제외, warn = 계산은 하되 표�
     "SCM 운영중 전환 필요": "warn", "비제스트 오프라인 판매 N": "warn",
     "SCM 오프라인 판매 미반영": "warn", "오프라인 판매 비제스트 N·SCM Y": "info",
     "글로벌 SKU(GLOBAL_3P)": "warn", "바코드 없음": "warn", "바코드 2개 이상": "info",
+    "SKU에 UID 여러 개 연결": "info",
 }
 
 
@@ -110,6 +111,11 @@ def build(rows: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     flag(df["brand_nm"].notna() & (df["brand_nm"] != df["brand_in"]), "브랜드 불일치")
     flag(df["fk_sku_id"].notna() & (df["n_barcode"] == 0), "바코드 없음")
     flag(df["n_barcode"] > 1, "바코드 2개 이상")
+    # 한 SKU 에 UID 가 여러 개 ACTIVE 로 연결 → 판매중·오프라인 판매 가능한 UID 를 골랐고 나머지는 other_goods 로 표시
+    gstr = pd.to_numeric(df["goods_no"], errors="coerce").astype("Int64").astype(str)
+    df["other_goods"] = [",".join(u for u in (a if isinstance(a, str) else "").split(",") if u and u != g)
+                         for a, g in zip(df["all_goods"], gstr)]
+    flag(pd.to_numeric(df["n_goods"], errors="coerce").fillna(0) > 1, "SKU에 UID 여러 개 연결")
 
     # 보충 발주 조건 ①: 상품(UID) 오프라인 판매 여부 = Y
     #   발주를 실제로 막는 값 = SKU 가 연결된 SCM-HUB product 행의 offline_sale_enabled (True → Y) → offline_yn
