@@ -354,13 +354,21 @@ def _moves(ret: str, brand: str | None, store: str | None, md: str | None = None
     df = _filter(df, brand, store, md=md)
     ok = (df["severity"] != "error") & (df["is_dup"].astype(str) != "True")
     lines = []
+
+    def stock_of(r) -> dict:
+        # 매장×SKU 단위 재고 (화면 확인용, CSV 양식에는 안 들어감). 이동중 = 출고 요청(출고 전) + 출고 후 이동중 + 직납 예정
+        g = lambda c: int(getattr(r, c, 0) or 0)
+        return {"fixed_qty": g("fixed_qty"), "stock_qty": g("stock_qty"), "avail_qty": g("avail_qty"),
+                "incoming_qty": g("incoming_qty"), "req_in_qty": g("req_in_qty"),
+                "moving_in_qty": g("moving_in_qty"), "direct_in_qty": g("direct_in_qty")}
+
     mv = df[ok & (df["alloc_qty"] > 0)]
     for r in mv.itertuples():
         lines.append({"storage_no": r.storage_no, "sku_id": r.sku_id, "goods_no": r.goods_no, "barcode": r.rep_barcode,
                       "move_qty": int(r.alloc_qty), "ret_qty": 0, "brand": r.src_file, "store_name": r.store_name,
                       "product_name": r.product_name, "option_name": r.option_name,
                       "off_4w": int(r.off_4w), "off_cum": int(r.off_cum), "off_w1": int(r.off_w1),
-                      "note": "운영상태(운영중) 먼저 업로드" if str(r.need_ops) == "True" else ""})
+                      "note": "운영상태(운영중) 먼저 업로드" if str(r.need_ops) == "True" else "", **stock_of(r)})
     rt = df[ok & (df["ret_qty"] > 0)]
     if ret == "nosale":
         rt = rt[rt["return_candidate"].astype(str) == "True"]
@@ -371,6 +379,7 @@ def _moves(ret: str, brand: str | None, store: str | None, md: str | None = None
     for r in rt.itertuples():
         left = int(r.ret_qty)
         cands = sorted(by.get((int(r.fk_sku_id), int(r.storage_id)), []), key=lambda x: -x[1]) or [(r.rep_barcode, left)]
+        st = stock_of(r)          # 바코드별로 나뉘어도 매장×SKU 재고는 첫 줄에만 (합계 중복 방지)
         for code, q in cands:
             if left <= 0:
                 break
@@ -379,7 +388,8 @@ def _moves(ret: str, brand: str | None, store: str | None, md: str | None = None
                           "ret_qty": take, "brand": r.src_file, "store_name": r.store_name,
                           "product_name": r.product_name, "option_name": r.option_name,
                           "off_4w": int(r.off_4w), "off_cum": int(r.off_cum), "off_w1": int(r.off_w1),
-                          "note": "4주 판매 없음" if str(r.return_candidate) == "True" else ""})
+                          "note": "4주 판매 없음" if str(r.return_candidate) == "True" else "", **st})
+            st = {k: None for k in st}
             left -= take
     m = pd.DataFrame(lines)
     if m.empty:

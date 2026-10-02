@@ -168,7 +168,7 @@ def build(rows: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     if len(onl):
         df = df.merge(onl, on="option_code", how="left")
 
-    num = ["stock_qty", "avail_qty", "incoming_qty", "outgoing_qty", "defect_qty", "off_w1", "off_w2",
+    num = ["stock_qty", "avail_qty", "incoming_qty", "req_in_qty", "moving_in_qty", "direct_in_qty", "outgoing_qty", "defect_qty", "off_w1", "off_w2",
            "off_w3", "off_w4", "off_today", "off_cum", "off_all_w1", "off_all_4w", "off_all_cum", "mfs_qty", "mfs_inbound_qty", "mfs_in_qty", "mfs_in_late_qty",
            "onl_w1", "onl_4w"]
     for c in num:
