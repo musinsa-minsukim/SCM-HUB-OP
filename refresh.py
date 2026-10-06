@@ -104,6 +104,16 @@ def _finish(out: pd.DataFrame, summary: dict, files: list, tb: pd.DataFrame, t0:
     ok_files = {f["brand"] for f in files if f.get("status") == "ok"}
     ok_brands = set(out.loc[out["src_file"].isin(ok_files), "brand_nm"].dropna())
     pairs = list(zip(tb["com_id"], tb["brand"]))
+    # RT(점간이동) 추천 — MFS 배분 뒤 남는 부족분을 미운영 매장 재고(1순위)·과재고(2순위)로. 과재고 반출 수량에서 RT 분을 뺀다
+    rt, out = engine.rt_plan(out, src)
+    rt = engine.rt_enrich(rt, out, src)
+    for c in rt.columns:
+        if rt[c].dtype == object:
+            rt[c] = rt[c].map(lambda v: "" if v is None or (isinstance(v, float) and pd.isna(v)) else str(v))
+    rt.to_parquet(os.path.join(CACHE_DIR, "rt.parquet"), index=False)
+    summary["rt_lines"] = len(rt)
+    summary["rt_qty"] = int(rt["rt_qty"].sum()) if len(rt) else 0
+    summary["rt_qty_p1"] = int(rt.loc[rt["priority"] == 1, "rt_qty"].sum()) if len(rt) else 0
     ops = engine.ops_changes(out, ok_brands, pairs, src)
     bc = engine.stock_barcodes(out, src)
     c2 = engine.case2_rows(ops, out, src)

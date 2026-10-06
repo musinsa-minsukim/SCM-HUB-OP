@@ -75,6 +75,35 @@ const offCols: ColDef[] = [
   colNum("off_w1", "7일 판매", "int"),
 ];
 
+const rtCols: ColDef[] = [
+  {
+    ...colText("priority_name", "구분", { pinned: "left", minWidth: 150 }),
+    cellStyle: ((p: any) => (p.data?.priority === 1 || p.data?.priority === "1" ? { color: "var(--ratio-down)", fontWeight: 700 } : { fontWeight: 600 })) as any,
+  },
+  colText("from_store", "보내는 매장", { minWidth: 150 }),
+  colText("to_store", "받는 매장", { minWidth: 150 }),
+  ...PRODUCT_COLS(),
+  colText("barcode", "바코드", { minWidth: 140 }),
+  { ...colNum("rt_qty", "이동수량", "int"), cellStyle: { color: "var(--ratio-up)", fontWeight: 700, textAlign: "right" } },
+  colNum("from_stock", "보내는 매장 현재고", "int"),
+  colNum("from_avail", "보내는 매장 판매가능", "int"),
+  colNum("from_fixed", "보내는 매장 고정 수량", "int", { headerTooltip: "1순위(미운영 매장)는 운영리스트에 없어서 0" }),
+  colNum("from_off_w1", "보내는 매장 7일 판매", "int"),
+  colNum("to_fixed", "받는 매장 고정 수량", "int"),
+  colNum("to_stock", "받는 매장 현재고", "int"),
+  colNum("to_avail", "받는 매장 판매가능", "int"),
+  colNum("to_incoming", "받는 매장 이동중", "int"),
+  colNum("to_mfs_alloc", "받는 매장 MFS 배분", "int", { headerTooltip: "② 재고 보충 파일로 MFS 에서 먼저 받는 수량. RT 는 그 뒤에도 남는 부족분만 채운다" }),
+  colNum("to_off_w1", "받는 매장 7일 판매", "int"),
+  colNum("to_off_4w", "받는 매장 4주 판매", "int"),
+  colNum("to_off_cum", "받는 매장 누적 판매", "int"),
+  COL.mfs,
+  colText("from_storage_no", "보내는 스토어코드", { minWidth: 110 }),
+  colText("to_storage_no", "받는 스토어코드", { minWidth: 110 }),
+  colText("src_file", "브랜드", { minWidth: 100 }),
+  colText("note", "메모", { minWidth: 160 }),
+];
+
 export default function Uploads({ dark, preset }: PageProps) {
   const [brand, setBrand] = useState<string[]>(preset.brand ? [preset.brand] : []);
   const [store, setStore] = useState<string[]>(preset.store ? [preset.store] : []);
@@ -88,12 +117,15 @@ export default function Uploads({ dark, preset }: PageProps) {
   const mv = useApi<any>("/moves" + qs(mvQ));
   const offQ = { brand, md };
   const off = useApi<any>("/offline_goods" + qs(offQ));
+  const [rtPri, setRtPri] = useState<string>("");
+  const rtQ = { priority: rtPri, brand, store, md };
+  const rt = useApi<any>("/rt" + qs(rtQ));
   const counts = ops.data?.counts ?? {};
   const stockOff = (ops.data?.rows ?? []).filter((r: any) => r.target_status === "미운영" && r.stock_qty > 0).length;
 
   return (
     <div className="space-y-5">
-      <ErrorBox msg={ops.err || mv.err || off.err} />
+      <ErrorBox msg={ops.err || mv.err || off.err || rt.err} />
       <Filters brand={brand} setBrand={setBrand} store={store} setStore={setStore} md={md} setMd={setMd} />
 
       <Card>
@@ -135,6 +167,25 @@ export default function Uploads({ dark, preset }: PageProps) {
             right={<div className="flex items-center gap-2">{off.loading && <Spinner />}
               <DlButton href={"/api/offline_goods.csv" + qs(offQ)} label="상품 목록" /></div>} />
           <TotalGrid dark={dark} rows={off.data?.rows ?? []} columns={offCols} height={420} />
+        </CardBody>
+      </Card>
+
+      <Card>
+        <CardBody>
+          <SectionTitle title={`④ RT(점간이동) 추천 ${num(rt.data?.total ?? 0)}줄`}
+            sub="MFS 배분(②) 뒤에도 남는 매장 부족분을 다른 매장 재고로 채웁니다. 1순위 = 운영리스트에 없는(미운영) 매장의 판매가능 재고, 2순위 = 운영 매장의 과재고(판매가능 − 고정). 받는 매장은 판매(7일 → 4주 → 누적)가 좋은 곳부터, 오프라인 판매 Y 인 상품만. 2순위로 보낸 수량은 ② 의 과재고 반출 수량에서 뺐습니다. 매장 필터는 보내는·받는 매장 어느 쪽이든 걸립니다."
+            right={<div className="flex items-center gap-2">{rt.loading && <Spinner />}
+              {[["", "전체"], ["1", "1순위 미운영"], ["2", "2순위 과재고"]].map(([v, l]) =>
+                <Chip key={v} active={rtPri === v} onClick={() => setRtPri(v)}>{l}</Chip>)}
+              <DlButton href={"/api/rt.csv" + qs(rtQ)} label="RT 추천 CSV" /></div>} />
+          <div className="mb-3 grid grid-cols-2 gap-3 md:grid-cols-4">
+            <Kpi label="RT 이동수량" value={num(rt.data?.qty ?? 0)} tone="good" />
+            <Kpi label="1순위 미운영 매장 재고" value={num(rt.data?.qty_p1 ?? 0)} />
+            <Kpi label="2순위 과재고" value={num(rt.data?.qty_p2 ?? 0)} />
+            <Kpi label="보내는 매장 수" value={num(rt.data?.from_stores ?? 0)} />
+          </div>
+          {/* 보내는·받는 매장 재고·판매는 한 매장이 여러 줄에 반복되므로 합계에서 뺀다(이동수량·MFS 재고만 합계) */}
+          <TotalGrid dark={dark} rows={rt.data?.rows ?? []} columns={rtCols} height={460} sum={["rt_qty", "mfs_qty"]} />
         </CardBody>
       </Card>
     </div>

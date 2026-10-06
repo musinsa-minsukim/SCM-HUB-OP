@@ -444,6 +444,53 @@ def _moves(ret: str, brand: str | None, store: str | None, md: str | None = None
     return m.drop(columns="_kind").reset_index(drop=True)
 
 
+RT_CSV = {  # RT(점간이동) 추천 CSV — SCM-HUB 전용 양식이 없어 화면 표 그대로(사용자 2026-10-06)
+    "priority_name": "구분", "src_file": "브랜드",
+    "from_storage_no": "보내는 스토어코드", "from_store": "보내는 매장", "to_storage_no": "받는 스토어코드", "to_store": "받는 매장",
+    "sku_id": "SKU ID", "goods_no": "UID", "product_name": "상품명", "option_name": "옵션명", "barcode": "바코드",
+    "rt_qty": "이동수량",
+    "from_stock": "보내는 매장 현재고", "from_avail": "보내는 매장 판매가능", "from_fixed": "보내는 매장 고정 운영 수량",
+    "from_off_w1": "보내는 매장 7일 판매", "from_off_cum": "보내는 매장 누적 판매",
+    "to_fixed": "받는 매장 고정 운영 수량", "to_stock": "받는 매장 현재고", "to_avail": "받는 매장 판매가능",
+    "to_incoming": "받는 매장 이동중 재고", "to_mfs_alloc": "받는 매장 MFS 배분", "to_need": "받는 매장 보충 필요",
+    "to_off_w1": "받는 매장 7일 판매", "to_off_4w": "받는 매장 4주 판매", "to_off_cum": "받는 매장 누적 판매",
+    "mfs_qty": "MFS 재고", "mfs_in_qty": "MFS 입고 예정", "note": "메모",
+}
+
+
+def _rt(priority: str | None, brand: str | None, store: str | None, md: str | None = None) -> pd.DataFrame:
+    rt = _extra("rt.parquet")
+    if rt.empty:
+        return rt
+    if priority:
+        rt = rt[rt["priority"].astype(str).isin(priority.split("|"))]
+    if md:
+        rt = rt[rt["src_file"].isin(_md_files(md))]
+    if brand:
+        rt = rt[rt["src_file"].isin(brand.split("|"))]
+    if store:   # 보내는·받는 매장 어느 쪽이든
+        ss = store.split("|")
+        rt = rt[rt["from_store"].isin(ss) | rt["to_store"].isin(ss)]
+    return rt
+
+
+@app.get("/api/rt")
+def rt_list(priority: str | None = None, brand: str | None = None, store: str | None = None, md: str | None = None,
+            u: str = Depends(user)):
+    rt = _rt(priority, brand, store, md)
+    by = rt.groupby("priority")["rt_qty"].sum().to_dict() if len(rt) else {}
+    return {"rows": records(rt), "total": len(rt), "qty": int(rt["rt_qty"].sum()) if len(rt) else 0,
+            "qty_p1": int(by.get(1, 0)), "qty_p2": int(by.get(2, 0)),
+            "from_stores": int(rt["from_store"].nunique()) if len(rt) else 0}
+
+
+@app.get("/api/rt.csv")
+def rt_csv(priority: str | None = None, brand: str | None = None, store: str | None = None, md: str | None = None,
+           u: str = Depends(user)):
+    rt = _rt(priority, brand, store, md)
+    return _csv(rt[[c for c in RT_CSV if c in rt]].rename(columns=RT_CSV), "store_transfer_rt.csv")
+
+
 @app.get("/api/moves")
 def moves(ret: str = "all", brand: str | None = None, store: str | None = None, md: str | None = None,
           u: str = Depends(user)):

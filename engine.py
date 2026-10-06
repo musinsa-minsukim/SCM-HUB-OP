@@ -420,6 +420,156 @@ def stock_barcodes(df: pd.DataFrame, src) -> pd.DataFrame:
                    lambda ks: _run_chunked(Q.store_stock_barcode, ks, sids), int)
 
 
+
+# ── RT(점간이동) 추천 (2026-10-06 사용자 요청) ─────────────────────────────────
+# 받는 쪽 = 브랜드 운영리스트에 있는(운영중이어야 할) 매장×SKU 중 **MFS 배분 뒤에도 남는 부족분**(short_qty).
+#   사용자 결정: MFS 먼저 → ② 재고 보충(MFS 이동) 수량은 그대로 두고, RT 는 남는 부족분만.
+#   오프라인 판매 N 이면 발주가 막히므로 제외(MFS 배분과 같은 조건).
+#   받는 매장 순서 = 매장 판매 7일 → 4주 → 누적 → 부족분 (MFS 배분과 같은 기준)
+# 보내는 쪽 1순위 = 미운영 매장 재고: 그 SKU 가 운영리스트에 없는 대상 매장(STORE_SCOPE)의 판매가능 재고
+#                  (재고가 많은 매장부터)
+# 보내는 쪽 2순위 = 과재고: 운영리스트 행의 과재고 반출 가능 수량(ret_qty, 판매가능 − 고정)
+#                  (4주 무판매 먼저 → 과잉 많은 순). RT 로 쓴 만큼 ② 파일의 과재고 반출 수량에서 뺀다.
+# 바코드 = 보내는 매장에 그 바코드 재고가 있는 것부터(반출과 같은 방식)으로 줄을 나눈다.
+RT_COLS = ["priority", "from_storage_id", "to_storage_id", "sku_id", "fk_sku_id", "barcode", "rt_qty"]
+
+
+def rt_plan(df: pd.DataFrame, src) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """반환: (RT 추천 줄, df[rt_in_qty·rt_out_qty 반영, ret_qty 차감])."""
+    df = df.copy()
+    df["rt_in_qty"] = 0
+    df["rt_out_qty"] = 0
+    usable = (df["severity"] != "error") & ~df["is_dup"] & df["storage_id"].notna() & df["fk_sku_id"].notna()
+    scope = set(STORE_SCOPE)
+    sheet = df[usable & df["storage_id"].isin(scope)]
+    if sheet.empty:
+        return pd.DataFrame(columns=RT_COLS), df
+    sheet_keys = set(zip(sheet["fk_sku_id"].astype("int64"), sheet["storage_id"].astype("int64")))
+    fks = sheet["fk_sku_id"].astype("int64").unique()
+
+    # 받는 쪽
+    dest = sheet[(sheet["offline_yn"] == "Y") & (sheet["short_qty"] > 0)]
+    # 보내는 쪽 1: 미운영 매장 재고
+    sids = _all_sids(src)
+    st = src.get("stock", fks, "fk_sku_id", lambda ks: _run_chunked(Q.store_stock, ks, sids), int)
+    s1 = pd.DataFrame(columns=["fk_sku_id", "storage_id", "avail_qty"])
+    if len(st) and "storage_id" in st:
+        st = st.drop_duplicates(["fk_sku_id", "storage_id"])
+        st = st[st["storage_id"].astype("int64").isin(scope) & (pd.to_numeric(st["avail_qty"], errors="coerce").fillna(0) > 0)]
+        s1 = st[[(int(a), int(b)) not in sheet_keys for a, b in zip(st["fk_sku_id"], st["storage_id"])]]
+    # 보내는 쪽 2: 과재고
+    s2 = sheet[sheet["ret_qty"] > 0]
+
+    if dest.empty or (s1.empty and s2.empty):
+        return pd.DataFrame(columns=RT_COLS), df
+
+    sup: dict[int, list] = {}   # fk → [[priority, storage_id, 남은 수량, df index(2순위만), 정렬키]]
+    for r in s1.itertuples():
+        sup.setdefault(int(r.fk_sku_id), []).append([1, int(r.storage_id), int(r.avail_qty), None, -int(r.avail_qty)])
+    for i, r in s2.iterrows():
+        nos = 0 if str(r["return_candidate"]) == "True" else 1
+        sup.setdefault(int(r["fk_sku_id"]), []).append([2, int(r["storage_id"]), int(r["ret_qty"]), i, nos * 10**9 - int(r["ret_qty"])])
+    for v in sup.values():
+        v.sort(key=lambda x: (x[0], x[4]))
+
+    moves = []   # (priority, from_sid, to_sid, fk, qty, src_index)
+    order = dest.sort_values(["off_w1", "off_4w", "off_cum", "short_qty"], ascending=False)
+    for i, r in order.iterrows():
+        fk, to, want = int(r["fk_sku_id"]), int(r["storage_id"]), int(r["short_qty"])
+        for sp in sup.get(fk, []):
+            if want <= 0:
+                break
+            if sp[2] <= 0 or sp[1] == to:
+                continue
+            q = min(want, sp[2])
+            sp[2] -= q
+            want -= q
+            moves.append((sp[0], sp[1], to, fk, q, sp[3]))
+            df.at[i, "rt_in_qty"] += q
+            if sp[3] is not None:
+                df.at[sp[3], "rt_out_qty"] += q
+    if not moves:
+        return pd.DataFrame(columns=RT_COLS), df
+    df["ret_qty"] = (df["ret_qty"] - df["rt_out_qty"]).clip(lower=0)
+    df["short_qty"] = (df["short_qty"] - df["rt_in_qty"]).clip(lower=0)
+
+    # 바코드별로 나누기 (보내는 매장에 재고가 있는 바코드부터)
+    bc = src.get("stock_bc", sorted({m[3] for m in moves}), "fk_sku_id",
+                 lambda ks: _run_chunked(Q.store_stock_barcode, ks, sids), int)
+    by: dict = {}
+    for b in bc.itertuples():
+        by.setdefault((int(b.fk_sku_id), int(b.storage_id)), []).append([b.barcode, int(b.avail_qty)])
+    for v in by.values():
+        v.sort(key=lambda x: -x[1])
+    rep = dict(zip(df["fk_sku_id"].dropna().astype("int64"), df.loc[df["fk_sku_id"].notna(), "rep_barcode"]))
+    sku = dict(zip(df["fk_sku_id"].dropna().astype("int64"), df.loc[df["fk_sku_id"].notna(), "sku_id"]))
+    lines = []
+    for pri, fr, to, fk, q, _ in moves:
+        left = q
+        for cand in by.get((fk, fr), []):
+            if left <= 0:
+                break
+            take = min(left, cand[1])
+            if take <= 0:
+                continue
+            cand[1] -= take
+            left -= take
+            lines.append((pri, fr, to, sku.get(fk), fk, cand[0], take))
+        if left > 0:   # 바코드별 재고를 못 찾으면 대표 바코드로
+            lines.append((pri, fr, to, sku.get(fk), fk, rep.get(fk), left))
+    return pd.DataFrame(lines, columns=RT_COLS), df
+
+
+def rt_enrich(rt: pd.DataFrame, df: pd.DataFrame, src) -> pd.DataFrame:
+    """RT 줄에 매장명·상품·양쪽 매장 재고/판매·MFS 재고를 붙인다(화면·CSV 용)."""
+    if rt.empty:
+        return rt
+    stores = src.whole("stores", lambda: dbx.run_df(Q.STORES)).drop_duplicates("storage_id").set_index("storage_id")
+    rt = rt.copy()
+    for side in ("from", "to"):
+        sid = rt[f"{side}_storage_id"].astype("int64")
+        rt[f"{side}_storage_no"] = sid.map(stores["storage_no"])
+        rt[f"{side}_store"] = sid.map(stores["scm_name"])
+        rt[f"{side}_shop_no"] = sid.map(stores["shop_no"])
+    prod = df.dropna(subset=["sku_id"]).drop_duplicates("sku_id").set_index("sku_id")
+    for c in ("goods_no", "product_name", "option_name", "src_file", "mfs_qty", "mfs_in_qty"):
+        rt[c] = rt["sku_id"].map(prod[c]) if c in prod else None
+    rt["priority_name"] = rt["priority"].map({1: "1순위 미운영 매장 재고", 2: "2순위 과재고"})
+    # 받는 매장(운영리스트 행) 지표
+    key = df[df["storage_id"].notna() & df["fk_sku_id"].notna()].drop_duplicates(["fk_sku_id", "storage_id"])
+    key = key.set_index([key["fk_sku_id"].astype("int64"), key["storage_id"].astype("int64")])
+    k_to = list(zip(rt["fk_sku_id"].astype("int64"), rt["to_storage_id"].astype("int64")))
+    for c, n in (("fixed_qty", "to_fixed"), ("stock_qty", "to_stock"), ("avail_qty", "to_avail"), ("incoming_qty", "to_incoming"),
+                 ("off_w1", "to_off_w1"), ("off_4w", "to_off_4w"), ("off_cum", "to_off_cum"), ("need_qty", "to_need"),
+                 ("alloc_qty", "to_mfs_alloc")):
+        rt[n] = [key[c].get(k, 0) if c in key else 0 for k in k_to]
+    rt["to_need_ops"] = [str(key["need_ops"].get(k, False)) == "True" if "need_ops" in key else False for k in k_to]
+    # 보내는 매장 재고: 매장 재고 원천(미운영 매장 포함)
+    sids = _all_sids(src)
+    st = src.get("stock", rt["fk_sku_id"].astype("int64").unique(), "fk_sku_id",
+                 lambda ks: _run_chunked(Q.store_stock, ks, sids), int)
+    stk = {}
+    if len(st) and "storage_id" in st:
+        st = st.drop_duplicates(["fk_sku_id", "storage_id"])
+        stk = {(int(a), int(b)): (int(c or 0), int(d or 0)) for a, b, c, d in
+               zip(st["fk_sku_id"], st["storage_id"], st["stock_qty"], st["avail_qty"])}
+    k_fr = list(zip(rt["fk_sku_id"].astype("int64"), rt["from_storage_id"].astype("int64")))
+    rt["from_stock"] = [stk.get(k, (0, 0))[0] for k in k_fr]
+    rt["from_avail"] = [stk.get(k, (0, 0))[1] for k in k_fr]
+    rt["from_fixed"] = [key["fixed_qty"].get(k, 0) if "fixed_qty" in key else 0 for k in k_fr]
+    # 보내는 매장 판매(7일·누적): 판매 원천(sku × shop)
+    sales = _sales(src, rt[["sku_id", "fk_sku_id"]].dropna().drop_duplicates("sku_id"))
+    sl = {}
+    if len(sales) and "shop_no" in sales:
+        sl = {(a, int(b)): (int(c or 0), int(d or 0)) for a, b, c, d in
+              zip(sales["sku_id"], pd.to_numeric(sales["shop_no"], errors="coerce").fillna(-1), sales["off_w1"], sales["off_cum"])}
+    k_sl = [(a, int(b) if pd.notna(b) else -1) for a, b in zip(rt["sku_id"], rt["from_shop_no"])]
+    rt["from_off_w1"] = [sl.get(k, (0, 0))[0] for k in k_sl]
+    rt["from_off_cum"] = [sl.get(k, (0, 0))[1] for k in k_sl]
+    rt["note"] = ["받는 매장 운영상태(운영중) 먼저 업로드" if x else "" for x in rt["to_need_ops"]]
+    return rt.sort_values(["src_file", "sku_id", "priority", "to_off_w1", "to_off_4w", "to_off_cum"],
+                          ascending=[True, True, True, False, False, False]).reset_index(drop=True)
+
 OUT_COLS = ["src_file", "src_row", "brand_in", "store_name", "sku_id", "goods_no", "product_name", "option_name",
             "rep_barcode", "other_barcodes", "n_barcode", "consignment_type", "storage_status",
             "fixed_qty", "stock_qty", "avail_qty", "incoming_qty", "outgoing_qty",
