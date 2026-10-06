@@ -16,6 +16,7 @@ import pandas as pd
 
 import dbx
 import engine
+import progress
 import queries as Q
 import sheets
 
@@ -29,7 +30,9 @@ def _now() -> str:
 
 def run() -> dict:
     t0 = time.time()
+    progress.reset()
     os.makedirs(CACHE_DIR, exist_ok=True)
+    progress.step("대상 브랜드 조회")
     tb = dbx.run_df(Q.target_brands(engine.MD_IDS, engine.EXTRA_BRANDS))
     target_names = set(tb["brand_nm"].dropna())
     rows, files = sheets.read_all(target_names)
@@ -61,6 +64,7 @@ def run() -> dict:
 def _finish(out: pd.DataFrame, summary: dict, files: list, tb: pd.DataFrame, t0: float, scm_only: bool = False) -> dict:
     """업로드 파일(ops/case2/stock_bc) 재계산 + 스냅샷·meta 저장. 전체 새로고침과 SCM 빠른 새로고침이 같이 쓴다."""
     # 업로드 파일용: 운영상태 변경 대상 + 반출 바코드별 재고 (시트를 정상으로 읽은 브랜드만)
+    progress.step("업로드 파일·스냅샷 저장")
     ok_files = {f["brand"] for f in files if f.get("status") == "ok"}
     ok_brands = set(out.loc[out["src_file"].isin(ok_files), "brand_nm"].dropna())
     pairs = list(zip(tb["com_id"], tb["brand"]))
@@ -90,9 +94,10 @@ def _finish(out: pd.DataFrame, summary: dict, files: list, tb: pd.DataFrame, t0:
         with open(os.path.join(CACHE_DIR, "meta.json"), encoding="utf-8") as f:
             prev = json.load(f)
     now = _now()
+    timings = progress.done()
     meta = {
         "refreshed_at": prev.get("refreshed_at", now) if scm_only else now,
-        "scm_refreshed_at": now,
+        "scm_refreshed_at": now, "timings": timings,
         "elapsed_sec": round(time.time() - t0, 1),
         "stock_date": str(stock_date[stock_date != ""].max()) if stock_date is not None and (stock_date != "").any() else "",
         "summary": summary,
@@ -106,6 +111,7 @@ def _finish(out: pd.DataFrame, summary: dict, files: list, tb: pd.DataFrame, t0:
 def run_scm() -> dict:
     """SCM 상태만 빠른 새로고침 — 직전 스냅샷에 매장 운영상태·오프라인 판매 여부만 다시 반영."""
     t0 = time.time()
+    progress.reset()
     p = os.path.join(CACHE_DIR, "rows.parquet")
     if not os.path.exists(p):
         raise RuntimeError("스냅샷이 없습니다 — 전체 새로고침을 먼저 실행하세요.")

@@ -63,29 +63,33 @@ export default function App() {
   useEffect(() => {
     if (!status?.job?.running) return;
     const t = setInterval(async () => {
-      const s = await api("/status");
+      const s = await api("/status").catch(() => null);
+      if (!s) return;
       setStatus(s);
-      if (!s.job.running) setVer((v) => v + 1);
+      if (!s.job.running) {
+        setVer((v) => v + 1);
+        if (s.job.error) alert(`새로고침 실패: ${s.job.error}`);
+      }
     }, 5000);
     return () => clearInterval(t);
   }, [status?.job?.running]);
 
-  // 새로고침은 서버가 끝까지 실행한 뒤 응답한다(Cloud Run CPU 제약). 기다리는 동안 버튼에 진행 표시.
+  // 새로고침은 서버 백그라운드에서 돈다. 시작만 요청하고, 진행·완료는 /status 폴링(위)으로 본다.
   const [busy, setBusy] = useState<"" | "full" | "scm">("");
   const startRefresh = async (kind: "full" | "scm" = "full") => {
     setBusy(kind);
     try {
       await api(kind === "scm" ? "/refresh/scm" : "/refresh", { method: "POST" });
-      setVer((v) => v + 1);
     } catch (e: any) {
       alert(String(e?.message || e));
     } finally {
+      await loadStatus();
       setBusy("");
-      loadStatus();
     }
   };
 
   const running = !!busy || status?.job?.running;
+  const kindNow = busy || (status?.job?.running ? status.job.kind : "");
   const Page = { brands: Brands, issues: Issues, matrix: Matrix, replenish: Replenish, uploads: Uploads, search: Search }[view];
   const title = NAV.find((n) => n.key === view)?.label;
 
@@ -130,18 +134,21 @@ export default function App() {
               {status?.scm_refreshed_at && status.scm_refreshed_at !== status.refreshed_at && <> · SCM {status.scm_refreshed_at.slice(11, 16)}</>}
               {status?.stock_date && <> · 재고 기준 {status.stock_date.slice(5)}</>}
             </span>
-            {status?.job?.error && <span className="text-rose-600" title={status.job.error}>새로고침 실패</span>}
+            {status?.job?.running && status.job.step && (
+              <span className="text-indigo-600 dark:text-indigo-300" title={`시작 ${status.job.started_at}`}>{status.job.step}…</span>
+            )}
+            {!status?.job?.running && status?.job?.error && <span className="text-rose-600" title={status.job.error}>새로고침 실패</span>}
             <button onClick={() => startRefresh("scm")} disabled={running}
               title="매장 운영상태(운영중/미운영)·비제스트 오프라인 판매 여부만 다시 읽습니다 (약 30초). 운영상태 업로드·비제스트 변경 후 반영 확인용. 원천 사본 지연 30분~1시간은 그대로"
               className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-60 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200">
-              <RefreshCw size={14} className={busy === "scm" ? "animate-spin" : ""} />
-              {busy === "scm" ? "SCM 읽는 중…" : "SCM 상태만"}
+              <RefreshCw size={14} className={kindNow === "scm" ? "animate-spin" : ""} />
+              {kindNow === "scm" ? "SCM 읽는 중…" : "SCM 상태만"}
             </button>
             <button onClick={() => startRefresh("full")} disabled={running}
               title="브랜드 시트·재고·판매·SCM 상태 전체를 다시 읽습니다 (1~3분)"
               className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-60 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200">
-              <RefreshCw size={14} className={busy === "full" ? "animate-spin" : ""} />
-              {busy === "full" ? "읽는 중…" : "새로고침"}
+              <RefreshCw size={14} className={kindNow === "full" ? "animate-spin" : ""} />
+              {kindNow === "full" ? "읽는 중…" : "새로고침"}
             </button>
             <button onClick={toggleDark} className="rounded-lg p-2 hover:bg-slate-100 dark:hover:bg-slate-800" aria-label="테마">
               {dark ? <Sun size={16} /> : <Moon size={16} />}

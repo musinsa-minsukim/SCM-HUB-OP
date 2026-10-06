@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 
 import dbx
+import progress
 import queries as Q
 from storematch import StoreMatcher
 
@@ -60,8 +61,38 @@ def _chunks(seq, n=10000):
 
 
 def _run_chunked(builder, keys, *extra) -> pd.DataFrame:
+    progress.step(f"원천 조회: {builder.__name__}")
     frames = [dbx.run_df(builder(part, *extra)) for part in _chunks(keys)]
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
+LINK_COLS = ["fk_sku_id", "goods_no", "product_name", "option_name", "option_code", "offline_sale_enabled",
+             "product_platform", "n_goods", "all_goods"]
+
+
+def pick_links(fk_sku_ids) -> pd.DataFrame:
+    """SKU 별 대표 상품 옵션(UID) 1건 + 함께 연결된 UID 수·목록. 우선순위는 queries.sku_links 위 주석 참고."""
+    fk_sku_ids = [int(x) for x in fk_sku_ids]
+    if not fk_sku_ids:
+        return pd.DataFrame(columns=LINK_COLS)
+    ln = _run_chunked(Q.sku_links, fk_sku_ids)
+    if ln.empty:
+        return pd.DataFrame(columns=LINK_COLS)
+    op = _run_chunked(Q.option_products, ln["fk_product_option_id"].dropna().astype("int64").unique())
+    m = ln.merge(op, on="fk_product_option_id", how="left")
+    m["goods_no"] = pd.to_numeric(m["goods_no"], errors="coerce").astype("Int64")
+    act = m["mapping_type"] == "ACTIVE"
+    m["_k1"] = (~act).astype(int)
+    m["_k2"] = (m["sales_status"] != "ACTIVE").astype(int)
+    m["_k3"] = (~m["offline_sale_enabled"].astype(str).str.lower().isin(["true", "1"])).astype(int)
+    m["_ut"] = pd.to_datetime(m["updated_at"], errors="coerce", utc=True)
+    best = (m.sort_values(["fk_sku_id", "_k1", "_k2", "_k3", "_ut"], ascending=[True, True, True, True, False])
+             .drop_duplicates("fk_sku_id"))
+    allg = (m[act & m["goods_no"].notna()].groupby("fk_sku_id")["goods_no"]
+            .agg(lambda s: sorted({str(int(x)) for x in s})))
+    best["all_goods"] = best["fk_sku_id"].map(lambda k: ",".join(allg.get(k, [])))
+    best["n_goods"] = best["fk_sku_id"].map(lambda k: len(allg.get(k, [])))
+    return best[LINK_COLS].reset_index(drop=True)
 
 
 def build(rows: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
@@ -104,6 +135,18 @@ def build(rows: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     # ── SKU 마스터 ──
     ok_ids = df.loc[df["sku_id"].str.match(SKU_RE), "sku_id"].unique()
     sm = _run_chunked(Q.sku_master, ok_ids)
+    if len(sm):
+        sm = sm.merge(pick_links(sm["fk_sku_id"].dropna().astype("int64").unique()), on="fk_sku_id", how="left")
+    gn = sm["goods_no"].dropna().astype(str).unique() if len(sm) else []
+    if len(gn):
+        ga = _run_chunked(Q.goods_attr, gn)
+        if len(ga):
+            sm = sm.merge(ga.assign(goods_no=ga["goods_no"].astype(str)),
+                          left_on=sm["goods_no"].astype(str), right_on="goods_no", how="left",
+                          suffixes=("", "_g")).drop(columns=["key_0", "goods_no_g"], errors="ignore")
+    for c in ("brand_nm", "com_id", "brand", "small_nm", "normal_price", "img"):
+        if c not in sm:
+            sm[c] = None
     df = df.merge(sm, on="sku_id", how="left")
     flag(df["sku_id"].str.match(SKU_RE) & df["fk_sku_id"].isna(), "SKU ID 원천에 없음")
     flag(df["purchase_type"].notna() & (df["purchase_type"] != "CONSIGNMENT"), "위탁 SKU 아님")
@@ -376,7 +419,7 @@ def scm_quick(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
         ss = _run_chunked(Q.storage_sku, fks, sids)[["fk_sku_id", "storage_id", "storage_status"]]
         key = dict(zip(zip(ss["fk_sku_id"].astype("int64"), ss["storage_id"].astype("int64")), ss["storage_status"]))
         df["storage_status"] = [key.get((int(a), int(b))) if pd.notna(a) and pd.notna(b) else None for a, b in zip(fk, sid)]
-        off = _run_chunked(Q.sku_offline, fks)
+        off = pick_links(fks)
         offmap = dict(zip(off["fk_sku_id"].astype("int64"), off["offline_sale_enabled"].map(offline_yn_from)))
         df["offline_yn"] = [offmap.get(int(a), "") if pd.notna(a) else "" for a in fk]
     reg = fk.notna() & sid.notna()

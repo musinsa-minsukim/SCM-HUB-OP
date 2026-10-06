@@ -19,25 +19,36 @@ from typing import Iterable
 KST_TODAY = "to_date(from_utc_timestamp(current_timestamp(), 'Asia/Seoul'))"
 
 # sku → product_option 1건 (ACTIVE 우선). 없으면 조인 시 ~5% 부풀려진다 (scm-hub 스킬 규칙).
-# SKU → 상품 옵션 1건. 한 SKU 에 ACTIVE 연결이 여러 상품(UID)인 경우가 있다(2026-10-02 실측: 대상 4,636 SKU 중 20개).
+# SKU → 상품 옵션(UID) 고르기. 한 SKU 에 ACTIVE 연결이 여러 상품인 경우가 있다(2026-10-02 실측: 대상 4,636 SKU 중 20개).
 #   예) S2601130000419: 3417694(판매중, 원래 연결) + 3862861(등록중, 2026-04 추가) → 최신순이면 3862861 로 잘못 잡힘.
 #   매장 실판매 UID(moss.order_option.goods_no)와 맞춰 본 우선순위:
 #   ① 연결 ACTIVE ② 상품 판매상태 ACTIVE(판매중지·등록중 뒤로) ③ 오프라인 판매 가능 ④ 최근 연결.
-#   n_goods/all_goods = ACTIVE 로 연결된 서로 다른 UID 수·목록 (화면에서 '다른 UID' 로 확인용).
+# ⚠️ 이 우선순위를 SQL 한 방(연결 3,300만 행 × 상품 조인 × 윈도우)으로 하면 쿼리 하나가 10분+ 걸려 새로고침이 끝나지
+#    않았다(2026-10-06). → sku_links(대상 SKU 연결 행) + option_products(그 옵션의 상품) 두 번의 작은 조회 후
+#    engine.pick_links 에서 고른다.
+def sku_links(fk_sku_ids: Iterable[int]) -> str:
+    return f"""
+SELECT fk_sku_id, fk_product_option_id, mapping_type, updated_at
+FROM ocmp.scm_hub.sku_product_option WHERE fk_sku_id IN ({int_list(fk_sku_ids)})"""
+
+
+def option_products(option_ids: Iterable[int]) -> str:
+    return f"""
+SELECT po._id fk_product_option_id, po.option_name, po.option_code,
+       p.product_no goods_no, p.product_name, p.offline_sale_enabled, p.platform product_platform, p.sales_status
+FROM ocmp.scm_hub.product_option po
+JOIN ocmp.scm_hub.product p ON p._id = po.fk_product_id
+WHERE po._id IN ({int_list(option_ids)})"""
+
+
+# enabled_store_skus(운영중 매장×SKU 전체, CASE2 후보)용 가벼운 매핑: ACTIVE 우선 → 최근. 브랜드 판별용이라 이걸로 충분
+# (UID 가 여러 개인 SKU 도 같은 브랜드). 화면의 상품 정보는 engine 이 pick_links 로 다시 붙인다.
 SPO = """spo AS (
-  SELECT fk_sku_id, fk_product_option_id, n_goods, all_goods FROM (
-    SELECT x.fk_sku_id, x.fk_product_option_id,
-      size(collect_set(CASE WHEN x.mapping_type='ACTIVE' THEN p.product_no END) OVER (PARTITION BY x.fk_sku_id)) n_goods,
-      concat_ws(',', sort_array(collect_set(CASE WHEN x.mapping_type='ACTIVE' THEN CAST(p.product_no AS STRING) END)
-                                OVER (PARTITION BY x.fk_sku_id))) all_goods,
-      ROW_NUMBER() OVER (PARTITION BY x.fk_sku_id
-        ORDER BY CASE WHEN x.mapping_type='ACTIVE' THEN 0 ELSE 1 END,
-                 CASE WHEN p.sales_status='ACTIVE' THEN 0 ELSE 1 END,
-                 CASE WHEN p.offline_sale_enabled THEN 0 ELSE 1 END,
-                 x.updated_at DESC) rn
-    FROM ocmp.scm_hub.sku_product_option x
-    LEFT JOIN ocmp.scm_hub.product_option po ON po._id = x.fk_product_option_id
-    LEFT JOIN ocmp.scm_hub.product p ON p._id = po.fk_product_id) WHERE rn = 1)"""
+  SELECT fk_sku_id, fk_product_option_id FROM (
+    SELECT fk_sku_id, fk_product_option_id,
+      ROW_NUMBER() OVER (PARTITION BY fk_sku_id
+        ORDER BY CASE WHEN mapping_type='ACTIVE' THEN 0 ELSE 1 END, updated_at DESC) rn
+    FROM ocmp.scm_hub.sku_product_option) WHERE rn = 1)"""
 
 
 def lit(v) -> str:
@@ -83,7 +94,6 @@ WITH s AS (
   SELECT _id fk_sku_id, sku_id, sku_name, sku_style_no, purchase_type, consignment_type,
          operation_status, regular_price
   FROM ocmp.scm_hub.sku WHERE sku_id IN ({str_list(sku_ids)})),
-{SPO},
 bc AS (
   SELECT sb.fk_sku_id,
          b.supplier_barcode, b.internal_barcode, sb.enabled,
@@ -98,28 +108,23 @@ bca AS (
          concat_ws(', ', sort_array(collect_list(CASE WHEN rk > 1 AND enabled = 1 THEN supplier_barcode END))) other_barcodes,
          SUM(CASE WHEN enabled = 1 THEN 1 ELSE 0 END) n_barcode,
          SUM(CASE WHEN enabled = 0 THEN 1 ELSE 0 END) n_barcode_disabled
-  FROM bc GROUP BY fk_sku_id),
-g AS (
-  SELECT goods_no, brand_nm, com_id, brand, small_nm, normal_price, img,
-         ROW_NUMBER() OVER (PARTITION BY goods_no ORDER BY goods_no) rn
-  FROM datamart.datamart.goods
-  WHERE goods_no IN (SELECT p.product_no FROM s
-                     JOIN spo ON spo.fk_sku_id = s.fk_sku_id
-                     JOIN ocmp.scm_hub.product_option po ON po._id = spo.fk_product_option_id
-                     JOIN ocmp.scm_hub.product p ON p._id = po.fk_product_id))
+  FROM bc GROUP BY fk_sku_id)
 SELECT s.sku_id, s.fk_sku_id, s.sku_name, s.sku_style_no, s.purchase_type, s.consignment_type,
        s.operation_status, s.regular_price,
-       p.product_no goods_no, p.product_name, po.option_name, po.option_code,
-       p.offline_sale_enabled, p.platform product_platform, spo.n_goods, spo.all_goods,
-       g.brand_nm, g.com_id, g.brand, g.small_nm, g.normal_price, g.img,
        bca.rep_barcode, bca.other_barcodes, COALESCE(bca.n_barcode, 0) n_barcode,
        COALESCE(bca.n_barcode_disabled, 0) n_barcode_disabled
 FROM s
-LEFT JOIN spo ON spo.fk_sku_id = s.fk_sku_id
-LEFT JOIN ocmp.scm_hub.product_option po ON po._id = spo.fk_product_option_id
-LEFT JOIN ocmp.scm_hub.product p ON p._id = po.fk_product_id
-LEFT JOIN g ON g.goods_no = p.product_no AND g.rn = 1
 LEFT JOIN bca ON bca.fk_sku_id = s.fk_sku_id"""
+
+
+def goods_attr(goods_nos: Iterable) -> str:
+    """상품(UID) 브랜드·카테고리 — sku_master 에서 떼어 냄(한 쿼리에 spo 를 두 번 엮으면 실행 계획이 망가져
+    10분 넘게 걸렸다, 2026-10-06)."""
+    return f"""
+SELECT goods_no, brand_nm, com_id, brand, small_nm, normal_price, img FROM (
+  SELECT goods_no, brand_nm, com_id, brand, small_nm, normal_price, img,
+         ROW_NUMBER() OVER (PARTITION BY goods_no ORDER BY goods_no) rn
+  FROM datamart.datamart.goods WHERE goods_no IN ({str_list(goods_nos)})) WHERE rn = 1"""
 
 
 # (재고 기준일 = daily_inventory 최근 5일 안의 MAX(stock_date) — 전체 스캔 방지)
@@ -184,12 +189,12 @@ GROUP BY di.fk_sku_id, di.fk_storage_id, b.supplier_barcode"""
 def enabled_store_skus(storage_ids: Iterable[int], brand_pairs: Iterable[tuple[str, str]]) -> str:
     pairs = " OR ".join(f"(g.com_id = {lit(c)} AND g.brand = {lit(b)})" for c, b in brand_pairs) or "FALSE"
     return f"""
-WITH {SPO},
-d AS (SELECT MAX(stock_date) d FROM ocmp.scm_hub.daily_inventory
-                   WHERE stock_date >= date_format(date_sub(current_date(), 5), 'yyyy-MM-dd')),
-ss AS (SELECT fk_sku_id, fk_storage_id storage_id, status, status_reason
+WITH ss AS (SELECT fk_sku_id, fk_storage_id storage_id, status, status_reason
        FROM ocmp.scm_hub.storage_sku
        WHERE status = 'OPERATION_ENABLED' AND fk_storage_id IN ({int_list(storage_ids)})),
+{SPO},
+d AS (SELECT MAX(stock_date) d FROM ocmp.scm_hub.daily_inventory
+                   WHERE stock_date >= date_format(date_sub(current_date(), 5), 'yyyy-MM-dd')),
 st AS (SELECT fk_sku_id, fk_storage_id storage_id, CAST(SUM(end_quantity) AS BIGINT) stock_qty
        FROM ocmp.scm_hub.daily_inventory
        WHERE stock_date = (SELECT d FROM d) AND fk_storage_id IN ({int_list(storage_ids)})
@@ -213,17 +218,6 @@ WHERE {pairs}"""
 # ⚠️ musinsa.bizest.goods.offline_goods_yn 은 '오프라인 전용 상품' 표시라 다른 항목이다(Y 대부분 [오프라인 전용]).
 # ⚠️ product 는 product_no 가 같은 29CM 상품 행이 따로 있다 → product_no 로 찾지 말고 SKU 가 연결된 product 행에서 읽는다
 #    (sku_master 의 p.offline_sale_enabled).
-
-
-def sku_offline(fk_sku_ids: Iterable[int]) -> str:
-    """SKU 가 연결된 SCM-HUB product 행의 오프라인 판매 가능 여부 (빠른 SCM 새로고침용)."""
-    return f"""
-WITH {SPO}
-SELECT spo.fk_sku_id, p.offline_sale_enabled
-FROM spo
-JOIN ocmp.scm_hub.product_option po ON po._id = spo.fk_product_option_id
-JOIN ocmp.scm_hub.product p ON p._id = po.fk_product_id
-WHERE spo.fk_sku_id IN ({int_list(fk_sku_ids)})"""
 
 
 def bizest_offline(goods_nos: Iterable[int]) -> str:

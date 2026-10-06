@@ -23,6 +23,8 @@ from dataclasses import dataclass, field, asdict
 
 import pandas as pd
 
+import progress
+
 try:
     import truststore
     truststore.inject_into_ssl()
@@ -212,8 +214,11 @@ def read_all(target_brand_names: set[str] | None = None) -> tuple[pd.DataFrame, 
 
     sess = _session()
     frames, statuses = [], []
-    for f in sorted(list_brand_files(sess), key=lambda x: x["name"]):
+    progress.step("브랜드 시트 목록")
+    files = sorted(list_brand_files(sess), key=lambda x: x["name"])
+    for n_f, f in enumerate(files, 1):
         name = f["name"]
+        progress.STATE["step"] = f"브랜드 시트 읽기 {n_f}/{len(files)}"
         brand = name[:-len(FILE_SUFFIX)] if name.endswith(FILE_SUFFIX) else name
         st = FileStatus(brand=brand, file_id=f["id"], modified=f.get("modifiedTime", ""),
                         owner=(f.get("owners") or [{}])[0].get("emailAddress", ""),
