@@ -1,4 +1,4 @@
-"""위탁 운영 — FastAPI. 스냅샷(cache/rows.parquet + meta.json)만 읽는다. 원천 조회는 refresh.py 몫.
+"""SCM-HUB 운영 — FastAPI. 스냅샷(cache/rows.parquet + meta.json)만 읽는다. 원천 조회는 refresh.py 몫.
 
 인증: Cloud Run 앞단 IAP(사내 Google 계정)가 막고, IAP 가 넣어 주는
 X-Goog-Authenticated-User-Email 헤더로 사용자를 표시한다. ALLOWED_DOMAIN 이 설정돼 있으면
@@ -28,7 +28,7 @@ DIST = os.path.join(APP_DIR, "web", "dist")
 ALLOWED_DOMAIN = os.environ.get("ALLOWED_DOMAIN", "")      # 예: musinsa.com
 REFRESH_TOKEN = os.environ.get("REFRESH_TOKEN", "")          # Cloud Scheduler 용
 
-app = FastAPI(title="위탁 운영 API")
+app = FastAPI(title="SCM-HUB 운영 API")
 
 
 # ── 인증 ────────────────────────────────────────────────────────────────

@@ -114,7 +114,7 @@ export default function App() {
           <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-500 to-indigo-600 text-white shadow-sm shadow-indigo-600/25">
             <Boxes size={18} />
           </div>
-          <span className="font-semibold tracking-tight text-slate-900 dark:text-slate-50">위탁 운영</span>
+          <span className="font-semibold tracking-tight text-slate-900 dark:text-slate-50">SCM-HUB 운영</span>
         </div>
         <nav className="flex-1 space-y-1 p-3">
           {NAV.map((n) => {
