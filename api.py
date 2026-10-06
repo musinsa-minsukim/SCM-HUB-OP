@@ -40,7 +40,25 @@ def user(x_goog_authenticated_user_email: str | None = Header(default=None)) -> 
 # ── 스냅샷 캐시 (파일 mtime 이 바뀌면 다시 읽음) ────────────────────────
 _cache = {"mtime": None, "df": None, "meta": None}
 _lock = threading.Lock()
-_job = {"running": False, "error": "", "started_at": ""}
+_job = {"running": False, "error": "", "started_at": "", "run_id": 0}
+# Cloud Run 요청 제한 시간(--timeout 900초)을 넘기면 클라이언트 요청은 끊기지만 서버 스레드는 CPU 없이 남아
+# running=True 가 계속 유지된다 → 버튼이 영영 비활성화(2026-10-06). 시작 후 이 시간이 지나면 멈춘 것으로 본다.
+STALE_SEC = int(os.environ.get("REFRESH_STALE_SEC", "960"))
+
+
+def _running() -> bool:
+    if not _job["running"]:
+        return False
+    try:
+        import datetime as _dt
+        started = _dt.datetime.strptime(_job["started_at"], "%Y-%m-%d %H:%M:%S")
+        now = _dt.datetime.strptime(refresh._now(), "%Y-%m-%d %H:%M:%S")
+        if (now - started).total_seconds() > STALE_SEC:
+            _job.update(running=False, error=f"이전 새로고침({_job['started_at']} 시작)이 제한 시간을 넘겨 멈춤 — 다시 실행하세요")
+            return False
+    except Exception:
+        pass
+    return True
 
 
 def snap() -> tuple[pd.DataFrame, dict]:
@@ -103,18 +121,21 @@ def status(u: str = Depends(user)):
         meta = {}
     return {"refreshed_at": meta.get("refreshed_at"), "scm_refreshed_at": meta.get("scm_refreshed_at"),
             "stock_date": meta.get("stock_date"),
-            "summary": meta.get("summary"), "job": _job}
+            "summary": meta.get("summary"), "job": {**_job, "running": _running()}}
 
 
 def _run_refresh(scm_only: bool = False):
-    _job.update(running=True, error="", started_at=refresh._now(), kind="scm" if scm_only else "full")
+    rid = _job["run_id"] + 1
+    _job.update(running=True, error="", started_at=refresh._now(), kind="scm" if scm_only else "full", run_id=rid)
     try:
         refresh.run_scm() if scm_only else refresh.run()
     except Exception as e:
-        _job["error"] = f"{e}"
+        if _job["run_id"] == rid:
+            _job["error"] = f"{e}"
         traceback.print_exc()
     finally:
-        _job["running"] = False
+        if _job["run_id"] == rid:   # 멈춘 것으로 처리된 옛 실행이 나중에 끝나도 새 실행 상태를 덮지 않게
+            _job["running"] = False
 
 
 @app.post("/api/refresh")
@@ -122,7 +143,7 @@ def start_refresh(u: str = Depends(user)):
     """새로고침을 요청 안에서 끝까지 실행한다(동기).
     Cloud Run 은 응답을 보낸 뒤엔 CPU 를 거의 주지 않아서, 백그라운드 스레드로 돌리면 매우 느려지거나 멈춘다.
     전체 브랜드 기준 약 1분, 요청 제한 시간(--timeout 900초) 안이다. 진행 상태는 /api/status 로 같이 보인다."""
-    if _job["running"]:
+    if _running():
         return {"started": False, "job": _job}
     _run_refresh()
     if _job["error"]:
@@ -134,7 +155,7 @@ def start_refresh(u: str = Depends(user)):
 def start_refresh_scm(u: str = Depends(user)):
     """SCM 상태만 빠른 새로고침(동기) — 매장 운영상태·오프라인 판매 여부만 다시 읽고 보충·업로드 파일 재계산.
     재고·판매·브랜드 시트는 직전 전체 새로고침 값. SCM-HUB 사본 자체의 30분~1시간 지연은 그대로."""
-    if _job["running"]:
+    if _running():
         return {"started": False, "job": _job}
     _run_refresh(scm_only=True)
     if _job["error"]:

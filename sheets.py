@@ -74,21 +74,29 @@ def _session():
 # Sheets API 읽기 한도 = 서비스 계정당 분당 60회. 파일마다 2회(탭 목록 + 값) × 50여 개를 연달아 부르면
 # 이름순 뒤쪽 파일(포기무디·포른른 등)이 429 로 '읽기 실패' 가 된다 (2026-10-02).
 # → ① 429·5xx 는 기다렸다 재시도 ② 수정 시각이 그대로인 파일은 지난번 읽은 결과를 재사용(호출 자체를 줄임).
+# ③ 호출 간격을 1.1초 이상으로 벌려 애초에 한도(분당 60회)에 닿지 않게 하고, 재시도 대기는 짧게(전체가 Cloud Run 15분 안에 끝나도록).
+# ④ 그래도 실패한 파일은 지난번에 읽은 값이 있으면 그걸 쓴다(브랜드가 통째로 빠지지 않게).
 RETRY_STATUS = {429, 500, 502, 503, 504}
+MIN_GAP = float(os.environ.get("SHEETS_MIN_GAP", "1.1"))
+_last_call = [0.0]
 SHEET_CACHE = os.path.join(os.environ.get("CACHE_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache")),
                            "sheet_cache")
 
 
-def _get(sess, url, params=None, tries: int = 6):
+def _get(sess, url, params=None, tries: int = 4):
     wait = 5.0
     for i in range(tries):
+        gap = time.time() - _last_call[0]
+        if gap < MIN_GAP:
+            time.sleep(MIN_GAP - gap)
+        _last_call[0] = time.time()
         r = sess.get(url, params=params)
         if r.status_code not in RETRY_STATUS or i == tries - 1:
             r.raise_for_status()
             return r
         ra = r.headers.get("Retry-After")
         time.sleep(float(ra) if ra and ra.isdigit() else wait)
-        wait = min(wait * 2, 60.0)
+        wait = min(wait * 2, 30.0)
     return r
 
 
@@ -96,7 +104,7 @@ def _cache_load(file_id: str, modified: str):
     try:
         with open(os.path.join(SHEET_CACHE, f"{file_id}.json"), encoding="utf-8") as f:
             meta = json.load(f)
-        if meta.get("modified") != modified:
+        if modified is not None and meta.get("modified") != modified:
             return None
         df = pd.read_pickle(os.path.join(SHEET_CACHE, f"{file_id}.pkl")) if meta.get("rows") else pd.DataFrame()
         return df, meta
@@ -242,7 +250,16 @@ def read_all(target_brand_names: set[str] | None = None) -> tuple[pd.DataFrame, 
                         frames.append(df)
                     _cache_save(f["id"], df, st)
             except Exception as e:  # 한 브랜드 실패가 전체를 막지 않게
-                st.status, st.detail = "읽기 실패", str(e)[:300]
+                old = _cache_load(f["id"], None)
+                if old is not None and old[1].get("status") == "ok":
+                    df, m = old
+                    if len(df):
+                        frames.append(df)
+                    for k in ("qty_header", "rows", "columns"):
+                        setattr(st, k, m.get(k, getattr(st, k)))
+                    st.detail = f"이번에 읽기 실패 → {m.get('modified', '')[:16]} 수정본 사용 ({str(e)[:120]})"
+                else:
+                    st.status, st.detail = "읽기 실패", str(e)[:300]
         statuses.append(asdict(st))
     rows = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     return rows, statuses
