@@ -29,6 +29,7 @@ const opsCols: ColDef[] = [
     cellStyle: ((p: any) => (p.data?.target_status === "미운영" && p.value > 0
       ? { color: "var(--ratio-down)", fontWeight: 700, textAlign: "right" } : { textAlign: "right" })) as any,
   },
+  COL.mfs,
   colText("reason", "사유", { minWidth: 200 }),
 ];
 
@@ -41,6 +42,7 @@ const moveCols: ColDef[] = [
   colNum("fixed_qty", "고정 운영 수량", "int"),
   colNum("stock_qty", "매장 현재고", "int"),
   colNum("avail_qty", "판매가능", "int", { headerTooltip: "매장 현재고 중 판매 가능한 수량(불량·보류 제외). 보충 필요 = 고정 − (판매가능 + 이동중)" }),
+  COL.mfs,
   { ...colNum("incoming_qty", "이동중 재고", "int", { headerTooltip: "매장으로 들어오는 중 = 출고 요청(출고 전) + 출고 후 이동중 + 직납 예정" }), cellStyle: { fontWeight: 700, textAlign: "right" } },
   colNum("req_in_qty", "└ 출고 요청", "int", { headerTooltip: "이동지시는 났지만 아직 허브에서 출고 전" }),
   colNum("moving_in_qty", "└ 출고 후 이동중", "int", { headerTooltip: "허브에서 출고됐고 매장 입고 전" }),
@@ -67,6 +69,7 @@ const offCols: ColDef[] = [
   colNum("skus", "SKU 수", "int"),
   colNum("fixed_qty", "고정 운영 수량", "int"),
   colNum("stock_qty", "매장 현재고", "int"),
+  colNum("mfs_qty", "MFS 재고", "int", { headerTooltip: "이 UID 의 운영리스트 SKU 들의 MFS 재고 합(SKU 별 1번)" }),
   colNum("need_qty", "보충 필요", "int"),
   colNum("off_cum", "누적 판매", "int"),
   colNum("off_w1", "7일 판매", "int"),

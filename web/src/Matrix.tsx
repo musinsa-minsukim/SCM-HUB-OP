@@ -15,6 +15,7 @@ export default function Matrix({ dark, nav }: PageProps) {
   const cols: ColDef[] = [
     colText("src_file", "브랜드", { pinned: "left", minWidth: 110 }),
     colNum("_total", "합계", "int", { cellStyle: { fontWeight: 700, textAlign: "right" } }),
+    ...(metric === "stock" ? [colNum("_mfs", "MFS 재고", "int", { headerTooltip: "브랜드 운영리스트 SKU 의 MFS 센터 재고(SKU 별 1번 합산). 매장 공통이라 매장 열과 별도" })] : []),
     ...stores.map((s) => colNum(s, s.replace("무신사 ", ""), "int", {
       cellStyle: ((p: any) => (p.value ? { textAlign: "right" } : { textAlign: "right", color: "var(--ratio-neutral)" })) as any,
     })),
@@ -30,7 +31,7 @@ export default function Matrix({ dark, nav }: PageProps) {
           {data && <TotalGrid dark={dark} rows={rows} columns={cols} height={640}
             onCellClicked={(e) => {
               const f = e.colDef?.field;
-              if (!e.data || e.data.__muTotal || !f || f === "src_file" || f === "_total") return;
+              if (!e.data || e.data.__muTotal || !f || f === "src_file" || f === "_total" || f === "_mfs") return;
               nav("search", { brand: e.data.src_file, store: f });
             }} />}
         </CardBody>

@@ -279,8 +279,9 @@ def matrix(metric: str = "skus", u: str = Depends(user)):
            "stock": ("stock_qty", "sum"), "need": ("need_qty", "sum")}[metric]
     pv = ok.pivot_table(index="src_file", columns="store_name", values=val[0], aggfunc=val[1], fill_value=0)
     stores = list(pv.columns)
-    rows = [{"brand": b, **{s: float(pv.at[b, s]) for s in stores}, "_total": float(pv.loc[b].sum())}
-            for b in pv.index]
+    mfs = ok.drop_duplicates(["src_file", "sku_id"]).groupby("src_file")["mfs_qty"].sum()
+    rows = [{"brand": b, **{s: float(pv.at[b, s]) for s in stores}, "_total": float(pv.loc[b].sum()),
+             "_mfs": float(mfs.get(b, 0))} for b in pv.index]
     return {"stores": stores, "rows": rows}
 
 
@@ -335,10 +336,22 @@ def _csv(df: pd.DataFrame, filename: str) -> Response:
                     headers={"Content-Disposition": f"attachment; filename={filename}"})
 
 
+def _mfs_map() -> dict:
+    """SKU → MFS 재고 (SKU 단위 값). 시트 행 + CASE2(시트에 없는 운영중) 에서 모은다."""
+    df, _ = snap()
+    parts = [df[["sku_id", "mfs_qty"]]]
+    c2 = _extra("case2.parquet")
+    if len(c2) and "mfs_qty" in c2:
+        parts.append(c2[["sku_id", "mfs_qty"]])
+    m = pd.concat(parts).dropna(subset=["sku_id"]).drop_duplicates("sku_id")
+    return dict(zip(m["sku_id"], pd.to_numeric(m["mfs_qty"], errors="coerce").fillna(0).astype(int)))
+
+
 def _ops(status: str | None, brand: str | None, store: str | None, md: str | None = None) -> pd.DataFrame:
     ops = _extra("ops.parquet")
     if ops.empty:
         return ops
+    ops = ops.assign(mfs_qty=ops["sku_id"].map(_mfs_map()).fillna(0).astype(int))
     # 브랜드 표기를 시트 파일 기준(src_file)으로 맞춰야 브랜드·MD 필터가 다른 화면과 같게 동작한다
     df, _ = snap()
     b2f = df[df["brand_nm"] != ""].groupby("brand_nm")["src_file"].agg(lambda s: s.mode().iat[0])
@@ -373,7 +386,7 @@ def ops_csv(status: str | None = None, brand: str | None = None, store: str | No
     if detail:
         out = out.assign(UID=sub.get("goods_no"), 브랜드=sub.get("brand_nm"), 매장=sub.get("store_name"),
                          상품명=sub.get("product_name"), 옵션명=sub.get("option_name"), 현재상태=sub.get("storage_status"), 사유=sub.get("reason"),
-                         매장재고=sub.get("stock_qty"))
+                         매장재고=sub.get("stock_qty"), MFS재고=sub.get("mfs_qty"))
     return _csv(out, "store_operation_status.csv")
 
 
@@ -387,7 +400,7 @@ def _moves(ret: str, brand: str | None, store: str | None, md: str | None = None
     def stock_of(r) -> dict:
         # 매장×SKU 단위 재고 (화면 확인용, CSV 양식에는 안 들어감). 이동중 = 출고 요청(출고 전) + 출고 후 이동중 + 직납 예정
         g = lambda c: int(getattr(r, c, 0) or 0)
-        return {"fixed_qty": g("fixed_qty"), "stock_qty": g("stock_qty"), "avail_qty": g("avail_qty"),
+        return {"fixed_qty": g("fixed_qty"), "stock_qty": g("stock_qty"), "avail_qty": g("avail_qty"), "mfs_qty": g("mfs_qty"),
                 "incoming_qty": g("incoming_qty"), "req_in_qty": g("req_in_qty"),
                 "moving_in_qty": g("moving_in_qty"), "direct_in_qty": g("direct_in_qty")}
 
@@ -465,6 +478,8 @@ def _offline_goods(brand: str | None, md: str | None) -> pd.DataFrame:
         stores=("store_name", "nunique"), skus=("sku_id", "nunique"),
         fixed_qty=("fixed_qty", "sum"), stock_qty=("stock_qty", "sum"),
         need_qty=("need_qty", "sum"), off_cum=("off_cum", "sum"), off_w1=("off_w1", "sum")).reset_index()
+    mfs = x.drop_duplicates(["src_file", "goods_no", "sku_id"]).groupby(["src_file", "goods_no"])["mfs_qty"].sum()
+    g["mfs_qty"] = [int(mfs.get((a, b), 0)) for a, b in zip(g["src_file"], g["goods_no"])]
     g["todo"] = g["bz_offline_yn"].eq("Y").map({True: "SCM 반영 대기", False: "비제스트 Y 전환"})
     return g.sort_values(["need_qty", "off_w1"], ascending=False)
 
@@ -480,7 +495,7 @@ def offline_goods_csv(brand: str | None = None, md: str | None = None, u: str = 
     g = _offline_goods(brand, md)
     cols = {"goods_no": "UID", "src_file": "브랜드", "product_name": "상품명", "todo": "할 일",
             "bz_offline_yn": "비제스트 오프라인 판매", "bz_offline_ut": "비제스트 변경 시각", "offline_yn": "SCM-HUB 오프라인 판매",
-            "stores": "운영 매장 수", "skus": "SKU 수", "fixed_qty": "고정 운영 수량", "stock_qty": "매장 현재고",
+            "stores": "운영 매장 수", "skus": "SKU 수", "fixed_qty": "고정 운영 수량", "stock_qty": "매장 현재고", "mfs_qty": "MFS 재고",
             "need_qty": "보충 필요", "off_cum": "누적 판매", "off_w1": "7일 판매"}
     return _csv(g[[c for c in cols if c in g]].rename(columns=cols), "offline_goods_yn.csv")
 
