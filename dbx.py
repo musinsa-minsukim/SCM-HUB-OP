@@ -42,9 +42,11 @@ def _connect():
 
 
 # 2026-10-06: 조회가 간헐적으로 응답 없이 멈춤(같은 쿼리가 1초 / 90초+ 들쭉날쭉) → 새로고침 전체가 끝없이 대기.
-# 조회마다 제한 시간(DBX_QUERY_TIMEOUT, 기본 180초)을 두고, 넘기면 취소·연결 폐기 후 새 연결로 재시도(최대 3번).
-QUERY_TIMEOUT = float(os.environ.get("DBX_QUERY_TIMEOUT", "180"))
-TRIES = int(os.environ.get("DBX_TRIES", "3"))
+# 조회마다 제한 시간(DBX_QUERY_TIMEOUT)을 두고, 넘기면 취소·연결 폐기 후 새 연결로 재시도.
+# ⚠️ 같은 날 확인: 공용 웨어하우스(Shared SQL Warehouse, 2X-Small, 최대 5클러스터)가 5/5 로 꽉 차서 조회가 대기열에서
+#    오래 기다린다. 너무 빨리 끊으면 대기열 맨 뒤로 다시 서게 되니 넉넉히 10분 × 2번.
+QUERY_TIMEOUT = float(os.environ.get("DBX_QUERY_TIMEOUT", "600"))
+TRIES = int(os.environ.get("DBX_TRIES", "2"))
 
 
 def _drop_conn(conn) -> None:

@@ -47,7 +47,7 @@ _job = {"running": False, "error": "", "started_at": "", "run_id": 0}
 # Cloud Run 요청 제한 시간(--timeout 900초)을 넘기면 클라이언트 요청은 끊기지만 서버 스레드는 CPU 없이 남아
 # running=True 가 계속 유지된다 → 버튼이 영영 비활성화(2026-10-06). 시작 후 이 시간이 지나면 멈춘 것으로 본다.
 # 백그라운드 실행으로 바꾼 뒤(2026-10-06)엔 요청 제한이 없으니 넉넉히 30분.
-STALE_SEC = int(os.environ.get("REFRESH_STALE_SEC", "1800"))
+STALE_SEC = int(os.environ.get("REFRESH_STALE_SEC", "3600"))
 
 
 def _running() -> bool:
