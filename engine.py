@@ -422,20 +422,21 @@ def stock_barcodes(df: pd.DataFrame, src) -> pd.DataFrame:
 
 
 # ── RT(점간이동) 추천 (2026-10-06 사용자 요청) ─────────────────────────────────
-# 받는 쪽 = 브랜드 운영리스트에 있는(운영중이어야 할) 매장×SKU 중 **MFS 배분 뒤에도 남는 부족분**(short_qty).
-#   사용자 결정: MFS 먼저 → ② 재고 보충(MFS 이동) 수량은 그대로 두고, RT 는 남는 부족분만.
+# 받는 쪽 = 브랜드 운영리스트에 있는(운영중이어야 할) 매장×SKU 의 보충 필요(need_qty) 전체.
+#   사용자 결정(2026-10-06 정정): **MFS 배분과 별개로** 본다 — ② 재고 보충(MFS 이동·과재고 반출)은 건드리지 않고,
+#   RT 는 따로 계산한 추천. 둘 다 올리면 같은 부족분을 두 번 채울 수 있으니 화면에 '받는 매장 MFS 배분'을 같이 보여 준다.
 #   오프라인 판매 N 이면 발주가 막히므로 제외(MFS 배분과 같은 조건).
 #   받는 매장 순서 = 매장 판매 7일 → 4주 → 누적 → 부족분 (MFS 배분과 같은 기준)
 # 보내는 쪽 1순위 = 미운영 매장 재고: 그 SKU 가 운영리스트에 없는 대상 매장(STORE_SCOPE)의 판매가능 재고
 #                  (재고가 많은 매장부터)
 # 보내는 쪽 2순위 = 과재고: 운영리스트 행의 과재고 반출 가능 수량(ret_qty, 판매가능 − 고정)
-#                  (4주 무판매 먼저 → 과잉 많은 순). RT 로 쓴 만큼 ② 파일의 과재고 반출 수량에서 뺀다.
+#                  (4주 무판매 먼저 → 과잉 많은 순). ② 의 과재고 반출 수량은 그대로(별개).
 # 바코드 = 보내는 매장에 그 바코드 재고가 있는 것부터(반출과 같은 방식)으로 줄을 나눈다.
 RT_COLS = ["priority", "from_storage_id", "to_storage_id", "sku_id", "fk_sku_id", "barcode", "rt_qty"]
 
 
 def rt_plan(df: pd.DataFrame, src) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """반환: (RT 추천 줄, df[rt_in_qty·rt_out_qty 반영, ret_qty 차감])."""
+    """반환: (RT 추천 줄, df[rt_in_qty·rt_out_qty 표시용]). ② 의 수량(alloc/ret/short)은 바꾸지 않는다."""
     df = df.copy()
     df["rt_in_qty"] = 0
     df["rt_out_qty"] = 0
@@ -448,7 +449,7 @@ def rt_plan(df: pd.DataFrame, src) -> tuple[pd.DataFrame, pd.DataFrame]:
     fks = sheet["fk_sku_id"].astype("int64").unique()
 
     # 받는 쪽
-    dest = sheet[(sheet["offline_yn"] == "Y") & (sheet["short_qty"] > 0)]
+    dest = sheet[(sheet["offline_yn"] == "Y") & (sheet["need_qty"] > 0)]
     # 보내는 쪽 1: 미운영 매장 재고
     sids = _all_sids(src)
     st = src.get("stock", fks, "fk_sku_id", lambda ks: _run_chunked(Q.store_stock, ks, sids), int)
@@ -473,9 +474,9 @@ def rt_plan(df: pd.DataFrame, src) -> tuple[pd.DataFrame, pd.DataFrame]:
         v.sort(key=lambda x: (x[0], x[4]))
 
     moves = []   # (priority, from_sid, to_sid, fk, qty, src_index)
-    order = dest.sort_values(["off_w1", "off_4w", "off_cum", "short_qty"], ascending=False)
+    order = dest.sort_values(["off_w1", "off_4w", "off_cum", "need_qty"], ascending=False)
     for i, r in order.iterrows():
-        fk, to, want = int(r["fk_sku_id"]), int(r["storage_id"]), int(r["short_qty"])
+        fk, to, want = int(r["fk_sku_id"]), int(r["storage_id"]), int(r["need_qty"])
         for sp in sup.get(fk, []):
             if want <= 0:
                 break
@@ -490,8 +491,6 @@ def rt_plan(df: pd.DataFrame, src) -> tuple[pd.DataFrame, pd.DataFrame]:
                 df.at[sp[3], "rt_out_qty"] += q
     if not moves:
         return pd.DataFrame(columns=RT_COLS), df
-    df["ret_qty"] = (df["ret_qty"] - df["rt_out_qty"]).clip(lower=0)
-    df["short_qty"] = (df["short_qty"] - df["rt_in_qty"]).clip(lower=0)
 
     # 바코드별로 나누기 (보내는 매장에 재고가 있는 바코드부터)
     bc = src.get("stock_bc", sorted({m[3] for m in moves}), "fk_sku_id",

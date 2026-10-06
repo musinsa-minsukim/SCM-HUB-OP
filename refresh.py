@@ -104,7 +104,7 @@ def _finish(out: pd.DataFrame, summary: dict, files: list, tb: pd.DataFrame, t0:
     ok_files = {f["brand"] for f in files if f.get("status") == "ok"}
     ok_brands = set(out.loc[out["src_file"].isin(ok_files), "brand_nm"].dropna())
     pairs = list(zip(tb["com_id"], tb["brand"]))
-    # RT(점간이동) 추천 — MFS 배분 뒤 남는 부족분을 미운영 매장 재고(1순위)·과재고(2순위)로. 과재고 반출 수량에서 RT 분을 뺀다
+    # RT(점간이동) 추천 — 보충 필요를 미운영 매장 재고(1순위)·과재고(2순위)로. MFS 배분(②)과 별개(② 수량 불변)
     rt, out = engine.rt_plan(out, src)
     rt = engine.rt_enrich(rt, out, src)
     for c in rt.columns:

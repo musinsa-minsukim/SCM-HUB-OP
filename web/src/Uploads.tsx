@@ -93,7 +93,7 @@ const rtCols: ColDef[] = [
   colNum("to_stock", "받는 매장 현재고", "int"),
   colNum("to_avail", "받는 매장 판매가능", "int"),
   colNum("to_incoming", "받는 매장 이동중", "int"),
-  colNum("to_mfs_alloc", "받는 매장 MFS 배분", "int", { headerTooltip: "② 재고 보충 파일로 MFS 에서 먼저 받는 수량. RT 는 그 뒤에도 남는 부족분만 채운다" }),
+  colNum("to_mfs_alloc", "받는 매장 MFS 배분", "int", { headerTooltip: "② 재고 보충 파일의 MFS 배분 수량(참고). RT 와 별개로 계산되므로 둘 다 올리면 보충 필요보다 많이 들어갈 수 있다" }),
   colNum("to_off_w1", "받는 매장 7일 판매", "int"),
   colNum("to_off_4w", "받는 매장 4주 판매", "int"),
   colNum("to_off_cum", "받는 매장 누적 판매", "int"),
@@ -173,7 +173,7 @@ export default function Uploads({ dark, preset }: PageProps) {
       <Card>
         <CardBody>
           <SectionTitle title={`④ RT(점간이동) 추천 ${num(rt.data?.total ?? 0)}줄`}
-            sub="MFS 배분(②) 뒤에도 남는 매장 부족분을 다른 매장 재고로 채웁니다. 1순위 = 운영리스트에 없는(미운영) 매장의 판매가능 재고, 2순위 = 운영 매장의 과재고(판매가능 − 고정). 받는 매장은 판매(7일 → 4주 → 누적)가 좋은 곳부터, 오프라인 판매 Y 인 상품만. 2순위로 보낸 수량은 ② 의 과재고 반출 수량에서 뺐습니다. 매장 필터는 보내는·받는 매장 어느 쪽이든 걸립니다."
+            sub="매장 보충 필요를 다른 매장 재고로 채우는 추천입니다. ② MFS 배분과 별개로 계산하므로 ② 수량은 그대로이고, 같은 부족분을 두 번 채우지 않게 '받는 매장 MFS 배분' 열을 같이 확인하세요. 1순위 = 운영리스트에 없는(미운영) 매장의 판매가능 재고, 2순위 = 운영 매장의 과재고(판매가능 − 고정, ② 과재고 반출과 겹칠 수 있음). 받는 매장은 판매(7일 → 4주 → 누적)가 좋은 곳부터, 오프라인 판매 Y 인 상품만. 매장 필터는 보내는·받는 매장 어느 쪽이든 걸립니다."
             right={<div className="flex items-center gap-2">{rt.loading && <Spinner />}
               {[["", "전체"], ["1", "1순위 미운영"], ["2", "2순위 과재고"]].map(([v, l]) =>
                 <Chip key={v} active={rtPri === v} onClick={() => setRtPri(v)}>{l}</Chip>)}
