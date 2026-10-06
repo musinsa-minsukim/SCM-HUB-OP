@@ -43,7 +43,7 @@ jobs:
           python-version: "3.12"
 
       - name: Python syntax check
-        run: python -m compileall -q api.py dbx.py engine.py queries.py refresh.py sheets.py storematch.py serve.py progress.py
+        run: python -m compileall -q api.py dbx.py engine.py queries.py refresh.py sheets.py storematch.py serve.py progress.py source.py
 
       - name: Store-name matching regression test (원천 접속 없음)
         run: python test_storematch.py

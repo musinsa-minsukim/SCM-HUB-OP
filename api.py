@@ -124,16 +124,17 @@ def status(u: str = Depends(user)):
     except HTTPException:
         meta = {}
     return {"refreshed_at": meta.get("refreshed_at"), "scm_refreshed_at": meta.get("scm_refreshed_at"),
+            "sheets_at": meta.get("sheets_at"), "scm_at": meta.get("scm_at"), "bizest_at": meta.get("bizest_at"),
             "stock_date": meta.get("stock_date"),
             "summary": meta.get("summary"), "timings": meta.get("timings"),
             "job": {**_job, "running": _running(), "step": progress.STATE["step"] if _job["running"] else ""}}
 
 
-def _run_refresh(scm_only: bool = False):
+def _run_refresh(kind: str = "full"):
     rid = _job["run_id"] + 1
-    _job.update(running=True, error="", started_at=refresh._now(), kind="scm" if scm_only else "full", run_id=rid)
+    _job.update(running=True, error="", started_at=refresh._now(), kind=kind, run_id=rid)
     try:
-        refresh.run_scm() if scm_only else refresh.run()
+        refresh.run(kind)
     except Exception as e:
         if _job["run_id"] == rid:
             _job["error"] = f"{e}"
@@ -143,29 +144,31 @@ def _run_refresh(scm_only: bool = False):
             _job["running"] = False
 
 
-def _start_bg(scm_only: bool) -> dict:
+def _start_bg(kind: str) -> dict:
     """백그라운드 스레드로 시작하고 바로 응답. 화면은 /api/status 의 job.running·step 을 5초마다 본다.
     (2026-10-06: 요청 안에서 끝까지 돌리면 오래 걸릴 때 요청이 끊겨 ERROR 가 남 → 배포에 --no-cpu-throttling 을
     줘서 응답 뒤에도 CPU 가 있으니 백그라운드로 돌린다)"""
+    if kind not in refresh.KINDS:
+        raise HTTPException(400, f"kind 는 {', '.join(refresh.KINDS)} 중 하나")
     with _lock:
         if _running():
             return {"started": False, "job": _job}
-        _job.update(running=True, error="", started_at=refresh._now(), kind="scm" if scm_only else "full")   # 스레드 시작 전 표시(중복 시작 방지)
-    threading.Thread(target=_run_refresh, args=(scm_only,), daemon=True).start()
+        _job.update(running=True, error="", started_at=refresh._now(), kind=kind)   # 스레드 시작 전 표시(중복 시작 방지)
+    threading.Thread(target=_run_refresh, args=(kind,), daemon=True).start()
     return {"started": True}
 
 
 @app.post("/api/refresh")
-def start_refresh(u: str = Depends(user)):
-    """전체 새로고침 시작(백그라운드)."""
-    return _start_bg(False)
+def start_refresh(kind: str = "full", u: str = Depends(user)):
+    """새로고침 시작(백그라운드). kind = full(전체) / scm(SCM-HUB) / bizest(비제스트 오프라인 판매) / sheets(브랜드 시트).
+    다시 읽지 않는 영역은 저장값을 쓰고, 새로 생긴 SKU 등 저장값에 없는 것만 추가 조회한다(source.py)."""
+    return _start_bg(kind)
 
 
 @app.post("/api/refresh/scm")
 def start_refresh_scm(u: str = Depends(user)):
-    """SCM 상태만 빠른 새로고침(동기) — 매장 운영상태·오프라인 판매 여부만 다시 읽고 보충·업로드 파일 재계산.
-    재고·판매·브랜드 시트는 직전 전체 새로고침 값. SCM-HUB 사본 자체의 30분~1시간 지연은 그대로."""
-    return _start_bg(True)
+    """(옛 경로) SCM-HUB 새로고침."""
+    return _start_bg("scm")
 
 
 @app.post("/api/cron/refresh")

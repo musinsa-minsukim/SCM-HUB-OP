@@ -95,8 +95,41 @@ def pick_links(fk_sku_ids) -> pd.DataFrame:
     return best[LINK_COLS].reset_index(drop=True)
 
 
-def build(rows: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
-    """rows: brand_in, store_in, sku_id_in, fixed_qty_in, src_file, src_row"""
+def fetch_sku(ids) -> pd.DataFrame:
+    """SKU 마스터 + 대표 UID(pick_links) + 상품 브랜드·카테고리(goods_attr)."""
+    sm = _run_chunked(Q.sku_master, ids)
+    if len(sm):
+        sm = sm.merge(pick_links(sm["fk_sku_id"].dropna().astype("int64").unique()), on="fk_sku_id", how="left")
+    gn = sm["goods_no"].dropna().astype(str).unique() if len(sm) and "goods_no" in sm else []
+    if len(gn):
+        ga = _run_chunked(Q.goods_attr, gn)
+        if len(ga):
+            sm = sm.merge(ga.assign(goods_no=ga["goods_no"].astype(str)),
+                          left_on=sm["goods_no"].astype(str), right_on="goods_no", how="left",
+                          suffixes=("", "_g")).drop(columns=["key_0", "goods_no_g"], errors="ignore")
+    for c in ["sku_id", "fk_sku_id", "rep_barcode", "other_barcodes", "n_barcode", "purchase_type", "consignment_type",
+              *LINK_COLS[1:], "brand_nm", "com_id", "brand", "small_nm", "normal_price", "img"]:
+        if c not in sm:
+            sm[c] = None
+    return sm
+
+
+def _all_sids(src) -> list[int]:
+    st = src.whole("stores", lambda: dbx.run_df(Q.STORES))
+    return sorted(st["storage_id"].dropna().astype("int64").unique())
+
+
+def _sales(src, sku_fk: pd.DataFrame) -> pd.DataFrame:
+    """오프라인 판매(sku_id × shop_no). 조회는 fk_sku_id 로 한다."""
+    fkmap = dict(zip(sku_fk["sku_id"].astype(str), sku_fk["fk_sku_id"]))
+    ids = [i for i in fkmap if pd.notna(fkmap[i])]
+    return src.get("sales", ids, "sku_id",
+                   lambda ks: _run_chunked(Q.offline_sales, [int(fkmap[k]) for k in ks if k in fkmap]))
+
+
+def build(rows: pd.DataFrame, src) -> tuple[pd.DataFrame, dict]:
+    """rows: brand_in, store_in, sku_id_in, fixed_qty_in, src_file, src_row
+    src: source.Source — 원천 조회 결과 저장소(영역별 새로고침)."""
     df = rows.copy()
     df["sku_id"] = df["sku_id_in"].astype(str).str.strip().str.upper()
     # CSV 로 읽으면 "1,000" 같은 천단위 쉼표가 붙어 온다
@@ -115,7 +148,7 @@ def build(rows: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     # ── 매장 매핑 ──
     # 매장명은 브랜드마다 조금씩 다르게 적는다 → storematch 가 정확·끝'점'·키워드 순으로 찾고,
     # 여러 매장이 걸리면(예: '홍대' = 스토어/킥스/뷰티) 자동으로 정하지 않는다. test_storematch.py 참고.
-    stores = dbx.run_df(Q.STORES)
+    stores = src.whole("stores", lambda: dbx.run_df(Q.STORES))
     sm = StoreMatcher(stores.to_dict("records"))
     m = df["store_in"].map(sm.match)
     df["storage_id"] = m.map(lambda x: x[0])
@@ -134,20 +167,10 @@ def build(rows: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
 
     # ── SKU 마스터 ──
     ok_ids = df.loc[df["sku_id"].str.match(SKU_RE), "sku_id"].unique()
-    sm = _run_chunked(Q.sku_master, ok_ids)
-    if len(sm):
-        sm = sm.merge(pick_links(sm["fk_sku_id"].dropna().astype("int64").unique()), on="fk_sku_id", how="left")
-    gn = sm["goods_no"].dropna().astype(str).unique() if len(sm) else []
-    if len(gn):
-        ga = _run_chunked(Q.goods_attr, gn)
-        if len(ga):
-            sm = sm.merge(ga.assign(goods_no=ga["goods_no"].astype(str)),
-                          left_on=sm["goods_no"].astype(str), right_on="goods_no", how="left",
-                          suffixes=("", "_g")).drop(columns=["key_0", "goods_no_g"], errors="ignore")
-    for c in ("brand_nm", "com_id", "brand", "small_nm", "normal_price", "img"):
-        if c not in sm:
-            sm[c] = None
-    df = df.merge(sm, on="sku_id", how="left")
+    sm = src.get("sku", ok_ids, "sku_id", fetch_sku)
+    for c in fetch_sku([]).columns if sm.empty else []:
+        sm[c] = None
+    df = df.merge(sm.drop_duplicates("sku_id"), on="sku_id", how="left")
     flag(df["sku_id"].str.match(SKU_RE) & df["fk_sku_id"].isna(), "SKU ID 원천에 없음")
     flag(df["purchase_type"].notna() & (df["purchase_type"] != "CONSIGNMENT"), "위탁 SKU 아님")
     flag(df["consignment_type"] == "GLOBAL_3P", "글로벌 SKU(GLOBAL_3P)")
@@ -165,11 +188,11 @@ def build(rows: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     #   비제스트 원장 값(stock.product.for_offline_sale) → bz_offline_yn. 둘이 다르면 플래그로 구분.
     en = df["offline_sale_enabled"].map(offline_yn_from)
     df["offline_yn"] = en.where(df["fk_sku_id"].notna(), "")
-    df = with_bizest_offline(df)
+    df = with_bizest_offline(df, src)
     for f, m in offline_flags(df).items():
         flag(m, f)
 
-    tb = dbx.run_df(Q.target_brands(MD_IDS, EXTRA_BRANDS))
+    tb = src.whole("tb", lambda: dbx.run_df(Q.target_brands(MD_IDS, EXTRA_BRANDS)))
     tb_keys = set(zip(tb["com_id"], tb["brand"]))
     df["offline_md"] = [dict(zip(zip(tb["com_id"], tb["brand"]), tb["offline_md_id"])).get((c, b))
                         for c, b in zip(df["com_id"], df["brand"])]
@@ -177,20 +200,21 @@ def build(rows: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
                                            index=df.index), "담당 MD 브랜드 아님")
 
     # ── 원천 수치 ──
-    fk = df["fk_sku_id"].dropna().astype("int64").unique()
-    sids = df["storage_id"].dropna().astype("int64").unique()
-    if len(fk) and len(sids):
-        st = _run_chunked(Q.store_stock, fk, sids)
-        ss = _run_chunked(Q.storage_sku, fk, sids)
-        sales = _run_chunked(Q.offline_sales, fk)
-    else:
-        st = ss = sales = pd.DataFrame()
-    mfs = _run_chunked(Q.mfs_stock, ok_ids)
-    inb = _run_chunked(Q.mfs_inbound, ok_ids)
-    onl = _run_chunked(Q.online_sales, df["option_code"].dropna().unique())
+    fk = pd.to_numeric(df["fk_sku_id"], errors="coerce").dropna().astype("int64").unique()
+    sids = _all_sids(src)
+    st = src.get("stock", fk, "fk_sku_id", lambda ks: _run_chunked(Q.store_stock, ks, sids), int)
+    ss = src.get("ss", fk, "fk_sku_id", lambda ks: _run_chunked(Q.storage_sku, ks, sids), int)
+    sales = _sales(src, df[["sku_id", "fk_sku_id"]].dropna().drop_duplicates("sku_id"))
+    mfs = src.get("mfs", ok_ids, "sku_id", lambda ks: _run_chunked(Q.mfs_stock, ks))
+    inb = src.get("inb", ok_ids, "sku_id", lambda ks: _run_chunked(Q.mfs_inbound, ks))
+    onl = src.get("onl", df["option_code"].dropna().unique(), "option_code", lambda ks: _run_chunked(Q.online_sales, ks))
+    if "storage_id" in st:
+        st = st.drop_duplicates(["fk_sku_id", "storage_id"])
+    if "storage_id" in ss:
+        ss = ss.drop_duplicates(["fk_sku_id", "storage_id"])
 
-    df["fk_sku_id"] = df["fk_sku_id"].astype("Int64")
-    df["storage_id"] = df["storage_id"].astype("Int64")
+    df["fk_sku_id"] = pd.to_numeric(df["fk_sku_id"], errors="coerce").astype("Int64")
+    df["storage_id"] = pd.to_numeric(df["storage_id"], errors="coerce").astype("Int64")
     if len(st):
         st = st.astype({"fk_sku_id": "Int64", "storage_id": "Int64"})
         df = df.merge(st, on=["fk_sku_id", "storage_id"], how="left")
@@ -211,11 +235,14 @@ def build(rows: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
         df["off_all_w1"] = df["sku_id"].map(tot["off_w1"])
         df["off_all_4w"] = df["sku_id"].map(tot.sum(axis=1))
         df["off_all_cum"] = df["sku_id"].map(sales.groupby("sku_id")["off_cum"].sum())
-    df = df.merge(mfs, on="sku_id", how="left")
+    if len(mfs):
+        df = df.merge(mfs.drop_duplicates("sku_id"), on="sku_id", how="left")
     if len(inb):
         df = df.merge(inb, on="sku_id", how="left")
     if len(onl):
-        df = df.merge(onl, on="option_code", how="left")
+        onl = onl.assign(option_code=onl["option_code"].astype(str)).drop_duplicates("option_code")
+        df = df.merge(onl, left_on=df["option_code"].astype(str), right_on="option_code", how="left",
+                      suffixes=("", "_o")).drop(columns=["key_0", "option_code_o"], errors="ignore")
 
     num = ["stock_qty", "avail_qty", "incoming_qty", "req_in_qty", "moving_in_qty", "direct_in_qty", "outgoing_qty", "defect_qty", "off_w1", "off_w2",
            "off_w3", "off_w4", "off_today", "off_cum", "off_all_w1", "off_all_4w", "off_all_cum", "mfs_qty", "mfs_inbound_qty", "mfs_in_qty", "mfs_in_late_qty",
@@ -236,12 +263,12 @@ SCM_FLAG = "SCM 운영중 전환 필요"
 OFFLINE_FLAGS = (OFFLINE_FLAG, SYNC_FLAG, REV_FLAG)
 
 
-def with_bizest_offline(df: pd.DataFrame) -> pd.DataFrame:
+def with_bizest_offline(df: pd.DataFrame, src) -> pd.DataFrame:
     """비제스트 원장 오프라인 판매 여부(bz_offline_yn)·변경 시각(bz_offline_ut, KST)을 UID 기준으로 붙인다."""
     df = df.drop(columns=["bz_offline_yn", "bz_offline_ut"], errors="ignore")
     g = pd.to_numeric(df["goods_no"], errors="coerce")
     gnos = g.dropna().astype("int64").unique()
-    bz = _run_chunked(Q.bizest_offline, gnos) if len(gnos) else pd.DataFrame()
+    bz = src.get("bizest", gnos, "goods_no", lambda ks: _run_chunked(Q.bizest_offline, ks), int) if len(gnos) else pd.DataFrame()
     if bz.empty:
         bz = pd.DataFrame({"goods_no": pd.Series(dtype="int64"), "bz_offline": [], "bz_offline_ut": []})
     ynmap = dict(zip(bz["goods_no"].astype("int64"), bz["bz_offline"].map(offline_yn_from)))
@@ -311,7 +338,7 @@ def replenish(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     return df, summary
 
 
-def ops_changes(df: pd.DataFrame, ok_brands: set[str], brand_pairs) -> pd.DataFrame:
+def ops_changes(df: pd.DataFrame, ok_brands: set[str], brand_pairs, src) -> pd.DataFrame:
     """SCM-HUB 스토어 운영상태 업로드 대상.
 
     규칙(사용자 정의 2026-09-30): 브랜드 시트에 있는 매장×SKU = 운영중, 없는 조합 = 미운영. 업로드 값은 '운영중'/'미운영' 둘뿐.
@@ -324,12 +351,12 @@ def ops_changes(df: pd.DataFrame, ok_brands: set[str], brand_pairs) -> pd.DataFr
                & df["brand_nm"].isin(ok_brands)]
     on = sheet[sheet["storage_status"] != "OPERATION_ENABLED"].assign(
         target_status="운영중", reason=lambda x: x["storage_status"].fillna("등록 없음").map(lambda v: f"시트에 있음 · SCM {v}"))
-    en = dbx.run_df(Q.enabled_store_skus(scope, brand_pairs))
+    en = src.whole("enabled", lambda: dbx.run_df(Q.enabled_store_skus(scope, brand_pairs)))
     en = en[en["brand_nm"].isin(ok_brands)]
     keys = set(zip(sheet["storage_id"].astype("int64"), sheet["sku_id"]))
     off = en[[(int(a), b) not in keys for a, b in zip(en["storage_id"], en["sku_id"])]].assign(
         target_status="미운영", reason="시트에 없음 · SCM 운영중", storage_status="OPERATION_ENABLED")
-    stores = dbx.run_df(Q.STORES).set_index("storage_id")
+    stores = src.whole("stores", lambda: dbx.run_df(Q.STORES)).set_index("storage_id")
     cols = ["storage_id", "fk_sku_id", "sku_id", "target_status", "reason", "brand_nm", "goods_no", "product_name",
             "option_name", "storage_status", "stock_qty"]
     out = pd.concat([on[cols], off[cols]], ignore_index=True)
@@ -339,28 +366,34 @@ def ops_changes(df: pd.DataFrame, ok_brands: set[str], brand_pairs) -> pd.DataFr
     return out.sort_values(["target_status", "brand_nm", "store_name", "sku_id"]).reset_index(drop=True)
 
 
-def case2_rows(ops: pd.DataFrame, df: pd.DataFrame) -> pd.DataFrame:
+def case2_rows(ops: pd.DataFrame, df: pd.DataFrame, src) -> pd.DataFrame:
     """취합 검증 CASE2 = 브랜드 운영리스트에 없는데 SCM-HUB 에서 운영중인 매장×SKU.
     CASE1(시트 행)과 같은 재고·판매 지표를 붙여서 한 표에 섞어 보여준다."""
     c2 = ops[ops["target_status"] == "미운영"].copy()
     if c2.empty:
         return pd.DataFrame()
-    stores = dbx.run_df(Q.STORES).set_index("storage_id")
+    stores = src.whole("stores", lambda: dbx.run_df(Q.STORES)).set_index("storage_id")
+    sids = _all_sids(src)
     c2["storage_id"] = c2["storage_id"].astype("int64")
     c2["fk_sku_id"] = c2["fk_sku_id"].astype("int64")
     c2["shop_no"] = c2["storage_id"].map(stores["shop_no"]).astype("Int64")
-    fk, sids = c2["fk_sku_id"].unique(), c2["storage_id"].unique()
-    st = _run_chunked(Q.store_stock, fk, sids).drop(columns=["stock_qty"], errors="ignore")
-    c2 = c2.merge(st.astype({"fk_sku_id": "int64", "storage_id": "int64"}), on=["fk_sku_id", "storage_id"], how="left")
-    sales = _run_chunked(Q.offline_sales, fk)
+    fk = c2["fk_sku_id"].unique()
+    st = src.get("stock", fk, "fk_sku_id", lambda ks: _run_chunked(Q.store_stock, ks, sids), int)
+    if len(st) and "storage_id" in st:
+        st = st.drop(columns=["stock_qty"], errors="ignore").drop_duplicates(["fk_sku_id", "storage_id"])
+        c2 = c2.merge(st.astype({"fk_sku_id": "int64", "storage_id": "int64"}), on=["fk_sku_id", "storage_id"], how="left")
+    sales = _sales(src, c2[["sku_id", "fk_sku_id"]].drop_duplicates("sku_id"))
     if len(sales):
         c2 = c2.merge(sales.astype({"shop_no": "Int64"}), on=["sku_id", "shop_no"], how="left")
-    c2 = c2.merge(_run_chunked(Q.mfs_stock, c2["sku_id"].unique()), on="sku_id", how="left")
-    inb = _run_chunked(Q.mfs_inbound, c2["sku_id"].unique())
+    mfs = src.get("mfs", c2["sku_id"].unique(), "sku_id", lambda ks: _run_chunked(Q.mfs_stock, ks))
+    if len(mfs):
+        c2 = c2.merge(mfs.drop_duplicates("sku_id"), on="sku_id", how="left")
+    inb = src.get("inb", c2["sku_id"].unique(), "sku_id", lambda ks: _run_chunked(Q.mfs_inbound, ks))
     if len(inb):
-        c2 = c2.merge(inb, on="sku_id", how="left")
-    sm = _run_chunked(Q.sku_master, c2["sku_id"].unique())[["sku_id", "rep_barcode", "other_barcodes", "n_barcode"]]
-    c2 = c2.merge(sm, on="sku_id", how="left")
+        c2 = c2.merge(inb.drop_duplicates("sku_id"), on="sku_id", how="left")
+    sm = src.get("sku", c2["sku_id"].unique(), "sku_id", fetch_sku)
+    if len(sm):
+        c2 = c2.merge(sm.drop_duplicates("sku_id")[["sku_id", "rep_barcode", "other_barcodes", "n_barcode"]], on="sku_id", how="left")
     for c in ("stock_qty", "avail_qty", "incoming_qty", "outgoing_qty", "off_w1", "off_cum", "mfs_qty", "mfs_inbound_qty", "mfs_in_qty", "mfs_in_late_qty"):
         if c not in c2:          # 해당 원천 결과가 0건이면 열 자체가 없다 (예: 입고 예정 없음)
             c2[c] = 0
@@ -377,13 +410,14 @@ def case2_rows(ops: pd.DataFrame, df: pd.DataFrame) -> pd.DataFrame:
     return c2.drop(columns=["target_status", "reason"])
 
 
-def stock_barcodes(df: pd.DataFrame) -> pd.DataFrame:
+def stock_barcodes(df: pd.DataFrame, src) -> pd.DataFrame:
     """반출 후보 행의 매장 바코드별 판매가능 재고 (반출 줄을 바코드별로 나누는 데 쓴다)."""
     c = df[(df["ret_qty"] > 0) & df["fk_sku_id"].notna() & df["storage_id"].notna()]
     if c.empty:
         return pd.DataFrame(columns=["fk_sku_id", "storage_id", "barcode", "avail_qty"])
-    return _run_chunked(Q.store_stock_barcode, c["fk_sku_id"].astype("int64").unique(),
-                        c["storage_id"].astype("int64").unique())
+    sids = _all_sids(src)
+    return src.get("stock_bc", c["fk_sku_id"].astype("int64").unique(), "fk_sku_id",
+                   lambda ks: _run_chunked(Q.store_stock_barcode, ks, sids), int)
 
 
 OUT_COLS = ["src_file", "src_row", "brand_in", "store_name", "sku_id", "goods_no", "product_name", "option_name",
@@ -401,32 +435,8 @@ if __name__ == "__main__":
     for c in ("src_file", "src_row"):
         if c not in rows:
             rows[c] = ""
-    out, summ = build(rows)
+    import source
+    out, summ = build(rows, source.Source(os.environ.get("CACHE_DIR", "cache"), source.SCM_TABLES | source.BIZEST_TABLES))
     out[[c for c in OUT_COLS if c in out]].to_csv(a.out, index=False, encoding="utf-8-sig")
     print(summ)
 
-
-def scm_quick(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
-    """SCM 상태만 빠르게 다시 반영 — 매장×SKU 운영상태(storage_sku) + 상품 오프라인 판매 여부.
-    재고·판매·MFS 는 직전 전체 새로고침 값을 그대로 쓰고, 두 상태와 그에 따른 플래그·배분만 다시 계산한다.
-    (원천은 Databricks 사본이라 SCM-HUB 대비 30분~1시간 지연은 그대로)"""
-    df = df.copy()
-    df["flags"] = df["flags_text"].fillna("").map(lambda t: [f for f in t.split(" / ") if f and f != SCM_FLAG and f not in OFFLINE_FLAGS])
-    fk = pd.to_numeric(df["fk_sku_id"], errors="coerce")
-    sid = pd.to_numeric(df["storage_id"], errors="coerce")
-    fks, sids = fk.dropna().astype("int64").unique(), sid.dropna().astype("int64").unique()
-    if len(fks) and len(sids):
-        ss = _run_chunked(Q.storage_sku, fks, sids)[["fk_sku_id", "storage_id", "storage_status"]]
-        key = dict(zip(zip(ss["fk_sku_id"].astype("int64"), ss["storage_id"].astype("int64")), ss["storage_status"]))
-        df["storage_status"] = [key.get((int(a), int(b))) if pd.notna(a) and pd.notna(b) else None for a, b in zip(fk, sid)]
-        off = pick_links(fks)
-        offmap = dict(zip(off["fk_sku_id"].astype("int64"), off["offline_sale_enabled"].map(offline_yn_from)))
-        df["offline_yn"] = [offmap.get(int(a), "") if pd.notna(a) else "" for a in fk]
-    reg = fk.notna() & sid.notna()
-    for i in df.index[reg & (df["storage_status"] != "OPERATION_ENABLED")]:
-        df.at[i, "flags"].append(SCM_FLAG)
-    df = with_bizest_offline(df)
-    for f, m in offline_flags(df).items():
-        for i in df.index[m]:
-            df.at[i, "flags"].append(f)
-    return replenish(df)
