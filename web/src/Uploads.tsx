@@ -78,7 +78,8 @@ const offCols: ColDef[] = [
 const rtCols: ColDef[] = [
   {
     ...colText("priority_name", "구분", { pinned: "left", minWidth: 150 }),
-    cellStyle: ((p: any) => (p.data?.priority === 1 || p.data?.priority === "1" ? { color: "var(--ratio-down)", fontWeight: 700 } : { fontWeight: 600 })) as any,
+    cellStyle: ((p: any) => (String(p.data?.priority) === "1" ? { color: "var(--ratio-up)", fontWeight: 700 }
+      : String(p.data?.priority) === "3" ? { color: "var(--ratio-down)", fontWeight: 700 } : { fontWeight: 600 })) as any,
   },
   colText("from_store", "보내는 매장", { minWidth: 150 }),
   colText("to_store", "받는 매장", { minWidth: 150 }),
@@ -173,16 +174,16 @@ export default function Uploads({ dark, preset }: PageProps) {
       <Card>
         <CardBody>
           <SectionTitle title={`④ RT(점간이동) 추천 ${num(rt.data?.total ?? 0)}줄`}
-            sub="매장 보충 필요를 다른 매장 재고로 채우는 추천입니다. ② MFS 배분과 별개로 계산하므로 ② 수량은 그대로이고, 같은 부족분을 두 번 채우지 않게 '받는 매장 MFS 배분' 열을 같이 확인하세요. 1순위 = 운영리스트에 없는(미운영) 매장의 판매가능 재고, 2순위 = 운영 매장의 과재고(판매가능 − 고정, ② 과재고 반출과 겹칠 수 있음). 받는 매장은 판매(7일 → 4주 → 누적)가 좋은 곳부터, 오프라인 판매 Y 인 상품만. 매장 필터는 보내는·받는 매장 어느 쪽이든 걸립니다."
+            sub="② MFS 배분과 별개로 계산합니다(② 의 MFS 이동 수량은 그대로 — '받는 매장 MFS 배분' 열로 겹침 확인). 1순위 = 미운영 매장 재고는 그 SKU 를 운영하는 매장으로 전부 보냅니다: 보충 필요를 판매(7일 → 4주 → 누적) 좋은 매장부터 채우고, 남는 수량은 판매 대비 재고가 적은 매장에 나눕니다. 운영 매장이 하나도 없는 SKU 는 '반납'으로 빼서 ② 파일의 과재고 반출 수량에 넣었습니다. 2순위 = 운영 매장 과재고로 남은 보충 필요를 채웁니다(② 과재고 반출과 겹칠 수 있음). 받는 매장은 오프라인 판매 Y 상품만. 매장 필터는 보내는·받는 매장 어느 쪽이든 걸립니다."
             right={<div className="flex items-center gap-2">{rt.loading && <Spinner />}
-              {[["", "전체"], ["1", "1순위 미운영"], ["2", "2순위 과재고"]].map(([v, l]) =>
+              {[["", "전체"], ["1", "1순위 미운영"], ["2", "2순위 과재고"], ["3", "반납"]].map(([v, l]) =>
                 <Chip key={v} active={rtPri === v} onClick={() => setRtPri(v)}>{l}</Chip>)}
               <DlButton href={"/api/rt.csv" + qs(rtQ)} label="RT 추천 CSV" /></div>} />
           <div className="mb-3 grid grid-cols-2 gap-3 md:grid-cols-4">
-            <Kpi label="RT 이동수량" value={num(rt.data?.qty ?? 0)} tone="good" />
+            <Kpi label="RT 이동수량" value={num((rt.data?.qty_p1 ?? 0) + (rt.data?.qty_p2 ?? 0))} tone="good" />
             <Kpi label="1순위 미운영 매장 재고" value={num(rt.data?.qty_p1 ?? 0)} />
             <Kpi label="2순위 과재고" value={num(rt.data?.qty_p2 ?? 0)} />
-            <Kpi label="보내는 매장 수" value={num(rt.data?.from_stores ?? 0)} />
+            <Kpi label="반납(운영 매장 없음)" value={num(rt.data?.qty_p3 ?? 0)} tone={rt.data?.qty_p3 ? "warn" : undefined} sub="② 과재고 반출에 포함" />
           </div>
           {/* 보내는·받는 매장 재고·판매는 한 매장이 여러 줄에 반복되므로 합계에서 뺀다(이동수량·MFS 재고만 합계) */}
           <TotalGrid dark={dark} rows={rt.data?.rows ?? []} columns={rtCols} height={460} sum={["rt_qty", "mfs_qty"]} />

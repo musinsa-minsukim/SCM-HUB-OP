@@ -104,17 +104,19 @@ def _finish(out: pd.DataFrame, summary: dict, files: list, tb: pd.DataFrame, t0:
     ok_files = {f["brand"] for f in files if f.get("status") == "ok"}
     ok_brands = set(out.loc[out["src_file"].isin(ok_files), "brand_nm"].dropna())
     pairs = list(zip(tb["com_id"], tb["brand"]))
-    # RT(점간이동) 추천 — 보충 필요를 미운영 매장 재고(1순위)·과재고(2순위)로. MFS 배분(②)과 별개(② 수량 불변)
-    rt, out = engine.rt_plan(out, src)
+    ops = engine.ops_changes(out, ok_brands, pairs, src)
+    # RT(점간이동) 추천 — 미운영 매장 재고는 운영 매장으로 전부(없으면 반납), 과재고는 보충 필요만. MFS 배분(②)과 별개
+    c2fks = ops.loc[ops["target_status"] == "미운영", "fk_sku_id"].dropna().astype("int64").unique() if len(ops) else []
+    rt, out = engine.rt_plan(out, src, c2fks)
     rt = engine.rt_enrich(rt, out, src)
     for c in rt.columns:
         if rt[c].dtype == object:
             rt[c] = rt[c].map(lambda v: "" if v is None or (isinstance(v, float) and pd.isna(v)) else str(v))
     rt.to_parquet(os.path.join(CACHE_DIR, "rt.parquet"), index=False)
     summary["rt_lines"] = len(rt)
-    summary["rt_qty"] = int(rt["rt_qty"].sum()) if len(rt) else 0
+    summary["rt_qty"] = int(rt.loc[rt["priority"] != 3, "rt_qty"].sum()) if len(rt) else 0
     summary["rt_qty_p1"] = int(rt.loc[rt["priority"] == 1, "rt_qty"].sum()) if len(rt) else 0
-    ops = engine.ops_changes(out, ok_brands, pairs, src)
+    summary["rt_return_qty"] = int(rt.loc[rt["priority"] == 3, "rt_qty"].sum()) if len(rt) else 0
     bc = engine.stock_barcodes(out, src)
     c2 = engine.case2_rows(ops, out, src)
     for c in c2.columns:

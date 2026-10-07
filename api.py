@@ -433,6 +433,23 @@ def _moves(ret: str, brand: str | None, store: str | None, md: str | None = None
                           "note": "4주 판매 없음" if str(r.return_candidate) == "True" else "", **st})
             st = {k: None for k in st}
             left -= take
+    # 미운영 매장 재고 중 그 SKU 를 운영하는 매장이 없어 반납할 것(RT 추천의 '반납') — 과재고 반출 수량으로 함께 올린다
+    rr = _rt("3", brand, None, md)
+    if len(rr) and store:
+        rr = rr[rr["from_store"].isin(store.split("|"))]
+    def n(v) -> int:
+        try:
+            f = float(v)
+            return 0 if f != f else int(f)
+        except (TypeError, ValueError):
+            return 0
+    for r in rr.itertuples():
+        lines.append({"storage_no": r.from_storage_no, "sku_id": r.sku_id, "goods_no": r.goods_no, "barcode": r.barcode,
+                      "move_qty": 0, "ret_qty": n(r.rt_qty), "brand": r.src_file, "store_name": r.from_store,
+                      "product_name": r.product_name, "option_name": r.option_name,
+                      "off_4w": 0, "off_cum": n(r.from_off_cum), "off_w1": n(r.from_off_w1),
+                      "note": "미운영 매장 재고 반납(운영 매장 없음)",
+                      "stock_qty": n(r.from_stock), "avail_qty": n(r.from_avail), "mfs_qty": n(r.mfs_qty)})
     m = pd.DataFrame(lines)
     if m.empty:
         return m
@@ -480,7 +497,7 @@ def rt_list(priority: str | None = None, brand: str | None = None, store: str | 
     rt = _rt(priority, brand, store, md)
     by = rt.groupby("priority")["rt_qty"].sum().to_dict() if len(rt) else {}
     return {"rows": records(rt), "total": len(rt), "qty": int(rt["rt_qty"].sum()) if len(rt) else 0,
-            "qty_p1": int(by.get(1, 0)), "qty_p2": int(by.get(2, 0)),
+            "qty_p1": int(by.get(1, 0)), "qty_p2": int(by.get(2, 0)), "qty_p3": int(by.get(3, 0)),
             "from_stores": int(rt["from_store"].nunique()) if len(rt) else 0}
 
 
