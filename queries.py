@@ -230,11 +230,28 @@ SELECT CAST(id AS BIGINT) goods_no, MAX(for_offline_sale) bz_offline, MAX(ut) bz
 FROM musinsa.stock.product WHERE id IN ({int_list(goods_nos)}) GROUP BY id"""
 
 
+# MFS 재고 = SCM-HUB 일별 재고(당일 진행분, 수시 갱신)에서 MFS 센터('…-온라인' 창고, 29CM 센터 제외)의 판매가능 합.
+# ⚠️ 2026-10-20: 예전 원천 team.commercepm.mfs_stock_daily 는 매일 04시 스냅샷이라, 아침에 입고된 신상(야세 16 SKU,
+#    07:18 입고 완료)이 하루 종일 0 → MFS 배분 0 → ② 재고 보충에 안 나왔다. 실시간 합은 스냅샷과 96% 일치(나머지는 당일 입출고).
+#    mfs_inbound_qty(스냅샷의 입고 예정)는 참고용으로만 같이 붙인다(화면의 'MFS 입고 예정'은 mfs_inbound 쿼리).
 def mfs_stock(sku_ids: Iterable[str]) -> str:
     return f"""
-SELECT sku_id, CAST(mfs_stock_qty AS BIGINT) mfs_qty,
-       CAST(mfs_inbound_expected_qty AS BIGINT) mfs_inbound_qty
-FROM team.commercepm.mfs_stock_daily WHERE sku_id IN ({str_list(sku_ids)})"""
+WITH d AS (SELECT MAX(stock_date) d FROM ocmp.scm_hub.daily_inventory
+           WHERE stock_date >= date_format(date_sub(current_date(), 5), 'yyyy-MM-dd')),
+s AS (SELECT _id, sku_id FROM ocmp.scm_hub.sku WHERE sku_id IN ({str_list(sku_ids)})),
+live AS (
+  SELECT s.sku_id, CAST(SUM(GREATEST(di.end_available_quantity, 0)) AS BIGINT) mfs_qty
+  FROM ocmp.scm_hub.daily_inventory di
+  JOIN s ON s._id = di.fk_sku_id
+  JOIN ocmp.scm_hub.storage sto ON sto._id = di.fk_storage_id
+   AND sto.name LIKE '%온라인%' AND sto.name NOT LIKE '%29CM%'
+  WHERE di.stock_date = (SELECT d FROM d)
+  GROUP BY s.sku_id)
+SELECT s.sku_id, COALESCE(live.mfs_qty, 0) mfs_qty,
+       CAST(COALESCE(m.mfs_inbound_expected_qty, 0) AS BIGINT) mfs_inbound_qty
+FROM s
+LEFT JOIN live ON live.sku_id = s.sku_id
+LEFT JOIN team.commercepm.mfs_stock_daily m ON m.sku_id = s.sku_id"""
 
 
 # ── 6-1) MFS 입고 예정 (브랜드 → MFS 센터, SCM-HUB 입고 원장 실시간) ─────────
