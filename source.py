@@ -23,6 +23,9 @@ import progress
 
 SCM_TABLES = {"stores", "tb", "sku", "stock", "ss", "stock_bc", "sales", "mfs", "inb", "onl", "enabled"}
 BIZEST_TABLES = {"bizest"}
+# SCM-HUB 재고(매장 재고·이동중·바코드별 재고·MFS 재고·MFS 입고 예정)는 **어떤 버튼이든 매번** 다시 읽는다
+# (사용자 2026-10-20: "어떤 버튼이든 SCM-HUB 재고 매번 다시 읽게"). 브랜드 시트·비제스트 버튼도 몇 분 걸릴 수 있다.
+STOCK_TABLES = {"stock", "stock_bc", "mfs", "inb"}
 LABEL = {"stores": "매장 목록", "tb": "대상 브랜드", "sku": "SKU 마스터(UID 연결·바코드)", "stock": "매장 재고·이동",
          "ss": "매장 운영상태", "stock_bc": "매장 바코드별 재고", "sales": "오프라인 판매", "mfs": "MFS 재고",
          "inb": "MFS 입고 예정", "onl": "온라인 판매", "enabled": "SCM 운영중 매장×SKU", "bizest": "비제스트 오프라인 판매 여부"}

@@ -125,6 +125,7 @@ def status(u: str = Depends(user)):
         meta = {}
     return {"refreshed_at": meta.get("refreshed_at"), "scm_refreshed_at": meta.get("scm_refreshed_at"),
             "sheets_at": meta.get("sheets_at"), "scm_at": meta.get("scm_at"), "bizest_at": meta.get("bizest_at"),
+            "stock_at": meta.get("stock_at") or meta.get("scm_at"),
             "stock_date": meta.get("stock_date"),
             "summary": meta.get("summary"), "timings": meta.get("timings"),
             "job": {**_job, "running": _running(), "step": progress.STATE["step"] if _job["running"] else ""}}

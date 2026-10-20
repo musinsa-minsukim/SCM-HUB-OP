@@ -32,10 +32,10 @@ def _now() -> str:
 KINDS = {  # 버튼 → 다시 읽는 영역 (source.py 참고)
     "full":   {"sheets": True,  "tables": source.SCM_TABLES | source.BIZEST_TABLES},
     "scm":    {"sheets": False, "tables": source.SCM_TABLES},
-    "bizest": {"sheets": False, "tables": source.BIZEST_TABLES},
-    "sheets": {"sheets": True,  "tables": set()},
+    "bizest": {"sheets": False, "tables": source.BIZEST_TABLES | source.STOCK_TABLES},
+    "sheets": {"sheets": True,  "tables": source.STOCK_TABLES},
 }
-STAMP = {"sheets": "sheets_at", "scm": "scm_at", "bizest": "bizest_at"}
+STAMP = {"sheets": "sheets_at", "scm": "scm_at", "bizest": "bizest_at"}   # + stock_at: 매 새로고침마다(재고는 항상 다시 읽음)
 
 
 def _prev_meta() -> dict:
@@ -91,6 +91,7 @@ def run(kind: str = "full") -> dict:
     for k, v in STAMP.items():
         if kind == "full" or kind == k or (k == "sheets" and read_sheets):
             stamps[v] = now
+    stamps["stock_at"] = now
     meta = _finish(out, summary, files, tb, t0, src, stamps, kind)
     src.save()
     return meta

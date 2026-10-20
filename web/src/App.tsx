@@ -42,8 +42,8 @@ type RefreshKind = "full" | "scm" | "bizest" | "sheets";
 const REFRESH: { kind: RefreshKind; label: string; tip: string }[] = [
   { kind: "full", label: "전체", tip: "브랜드 시트 + SCM-HUB + 비제스트 를 모두 다시 읽습니다 (가장 오래 걸림)" },
   { kind: "scm", label: "SCM-HUB", tip: "SKU 마스터(UID 연결·바코드), 매장 운영상태, 매장 재고·이동, MFS 재고·입고 예정, 판매를 다시 읽습니다. 브랜드 시트·비제스트 값은 직전 값" },
-  { kind: "bizest", label: "비제스트", tip: "상품(UID) 비제스트 오프라인 판매 여부만 다시 읽습니다 (가장 빠름)" },
-  { kind: "sheets", label: "브랜드 시트", tip: "브랜드 운영 상품 리스트만 다시 읽습니다. 새로 추가된 SKU 의 재고·판매는 그 SKU 만 추가 조회" },
+  { kind: "bizest", label: "비제스트", tip: "상품(UID) 비제스트 오프라인 판매 여부 + SCM-HUB 재고(매장·MFS·이동중·입고 예정)를 다시 읽습니다" },
+  { kind: "sheets", label: "브랜드 시트", tip: "브랜드 운영 상품 리스트 + SCM-HUB 재고(매장·MFS·이동중·입고 예정)를 다시 읽습니다. 새로 추가된 SKU 의 판매 등은 그 SKU 만 추가 조회" },
 ];
 // "MM-DD HH:MM" — 오늘이면 시각만
 const stamp = (label: string, v?: string) => {
@@ -143,9 +143,10 @@ export default function App() {
           </select>
           <h2 className="hidden text-base font-semibold tracking-tight text-slate-900 lg:block dark:text-slate-50">{title}</h2>
           <div className="ml-auto flex items-center gap-3 text-xs text-slate-500 dark:text-slate-400">
-            <span title="영역별 마지막으로 읽은 시각 (시트 = 브랜드 운영 상품 리스트 / SCM = SCM-HUB 상품·재고·운영상태·판매 / 비제스트 = 오프라인 판매 여부)">
+            <span title="영역별 마지막으로 읽은 시각 (시트 = 브랜드 운영 상품 리스트 / SCM = SCM-HUB 상품·운영상태·판매 / 재고 = SCM-HUB 매장·MFS 재고·이동중·입고 예정, 어떤 버튼이든 매번 다시 읽음 / 비제스트 = 오프라인 판매 여부)">
               {stamp("시트", status?.sheets_at ?? status?.refreshed_at)}
               {" · "}{stamp("SCM", status?.scm_at ?? status?.scm_refreshed_at)}
+              {" · "}{stamp("재고", status?.stock_at ?? status?.scm_at)}
               {" · "}{stamp("비제스트", status?.bizest_at ?? status?.refreshed_at)}
               {status?.stock_date && <> · 재고 기준 {status.stock_date.slice(5)}</>}
             </span>
