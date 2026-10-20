@@ -118,13 +118,28 @@ LEFT JOIN bca ON bca.fk_sku_id = s.fk_sku_id"""
 
 
 def goods_attr(goods_nos: Iterable) -> str:
-    """상품(UID) 브랜드·카테고리 — sku_master 에서 떼어 냄(한 쿼리에 spo 를 두 번 엮으면 실행 계획이 망가져
-    10분 넘게 걸렸다, 2026-10-06)."""
+    """상품(UID) 브랜드·카테고리.
+    ⚠️ 2026-10-20: 예전엔 datamart.datamart.goods(하루 배치)에서 읽었는데 최신 UID ~1만 개가 아직 없어
+    신상품의 브랜드가 비고 → ① 운영상태 파일 등에서 빠질 수 있었다. 브랜드(업체·브랜드 코드·브랜드명)는
+    실시간 원장(musinsa.stock.product + partnerportal.brand, 약 1시간 지연)에서 읽고,
+    카테고리·정상가·이미지(표시용)만 datamart 에서 붙인다."""
     return f"""
-SELECT goods_no, brand_nm, com_id, brand, small_nm, normal_price, img FROM (
-  SELECT goods_no, brand_nm, com_id, brand, small_nm, normal_price, img,
-         ROW_NUMBER() OVER (PARTITION BY goods_no ORDER BY goods_no) rn
-  FROM datamart.datamart.goods WHERE goods_no IN ({str_list(goods_nos)})) WHERE rn = 1"""
+WITH p AS (
+  SELECT CAST(id AS BIGINT) goods_no, company_id com_id, brand_id brand FROM (
+    SELECT id, company_id, brand_id, ROW_NUMBER() OVER (PARTITION BY id ORDER BY ut DESC) rn
+    FROM musinsa.stock.product WHERE id IN ({int_list(int(g) for g in goods_nos)})) WHERE rn = 1),
+b AS (
+  SELECT brand, brand_nm FROM (
+    SELECT brand, brand_nm, ROW_NUMBER() OVER (PARTITION BY brand ORDER BY tr_ts DESC NULLS LAST, ut DESC) rn
+    FROM musinsa.partnerportal.brand WHERE Op IS NULL OR Op != 'delete') WHERE rn = 1),
+dg AS (
+  SELECT goods_no, brand_nm, small_nm, normal_price, img FROM (
+    SELECT CAST(goods_no AS BIGINT) goods_no, brand_nm, small_nm, normal_price, img,
+           ROW_NUMBER() OVER (PARTITION BY goods_no ORDER BY goods_no) rn
+    FROM datamart.datamart.goods WHERE goods_no IN ({str_list(goods_nos)})) WHERE rn = 1)
+SELECT CAST(p.goods_no AS STRING) goods_no, COALESCE(b.brand_nm, dg.brand_nm) brand_nm, p.com_id, p.brand,
+       dg.small_nm, dg.normal_price, dg.img
+FROM p LEFT JOIN b ON b.brand = p.brand LEFT JOIN dg ON dg.goods_no = p.goods_no"""
 
 
 # (재고 기준일 = daily_inventory 최근 5일 안의 MAX(stock_date) — 전체 스캔 방지)
@@ -233,7 +248,7 @@ FROM musinsa.stock.product WHERE id IN ({int_list(goods_nos)}) GROUP BY id"""
 # MFS 재고 = SCM-HUB 일별 재고(당일 진행분, 수시 갱신)에서 MFS 센터('…-온라인' 창고, 29CM 센터 제외)의 판매가능 합.
 # ⚠️ 2026-10-20: 예전 원천 team.commercepm.mfs_stock_daily 는 매일 04시 스냅샷이라, 아침에 입고된 신상(야세 16 SKU,
 #    07:18 입고 완료)이 하루 종일 0 → MFS 배분 0 → ② 재고 보충에 안 나왔다. 실시간 합은 스냅샷과 96% 일치(나머지는 당일 입출고).
-#    mfs_inbound_qty(스냅샷의 입고 예정)는 참고용으로만 같이 붙인다(화면의 'MFS 입고 예정'은 mfs_inbound 쿼리).
+#    스냅샷 테이블은 더 이상 쓰지 않는다(mfs_inbound_qty 는 호환용 0 — 화면의 'MFS 입고 예정'은 mfs_inbound 쿼리, 실시간).
 def mfs_stock(sku_ids: Iterable[str]) -> str:
     return f"""
 WITH d AS (SELECT MAX(stock_date) d FROM ocmp.scm_hub.daily_inventory
@@ -247,11 +262,9 @@ live AS (
    AND sto.name LIKE '%온라인%' AND sto.name NOT LIKE '%29CM%'
   WHERE di.stock_date = (SELECT d FROM d)
   GROUP BY s.sku_id)
-SELECT s.sku_id, COALESCE(live.mfs_qty, 0) mfs_qty,
-       CAST(COALESCE(m.mfs_inbound_expected_qty, 0) AS BIGINT) mfs_inbound_qty
+SELECT s.sku_id, COALESCE(live.mfs_qty, 0) mfs_qty, CAST(0 AS BIGINT) mfs_inbound_qty
 FROM s
-LEFT JOIN live ON live.sku_id = s.sku_id
-LEFT JOIN team.commercepm.mfs_stock_daily m ON m.sku_id = s.sku_id"""
+LEFT JOIN live ON live.sku_id = s.sku_id"""
 
 
 # ── 6-1) MFS 입고 예정 (브랜드 → MFS 센터, SCM-HUB 입고 원장 실시간) ─────────
