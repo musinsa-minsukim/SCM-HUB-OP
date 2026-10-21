@@ -149,8 +149,10 @@ FROM p LEFT JOIN b ON b.brand = p.brand LEFT JOIN dg ON dg.goods_no = p.goods_no
 # 재고 정의 (한 기준으로 통일):
 #   stock_qty     = end_quantity            (실물 재고, 당일 입출고·판매 반영)
 #   avail_qty     = end_available_quantity  (판매가능 = 실물 − 출고예정 등 묶인 수량) ← 보충 계산 기준
-#   incoming_qty  = expected_in + moving_in + expected_inbound  (입고 예정 + 이동 중 + 직납 예정)
-#   outgoing_qty  = expected_out + moving_out                    (출고 예정 + 출고 이동 중)
+#   incoming_qty  = 이동 입고 예정 = expected_in(편집샵 보충 요청) + moving_in(편집샵 보충 확정 후 이동중)
+#                   (사용자 정의 2026-10-21. 직납 예정 expected_inbound 는 direct_in_qty 로 따로 표시, 계산 제외)
+#   outgoing_qty  = 매장 반납/반출 예정(매장 → MFS·파트너사) = expected_out + moving_out + expected_vendor_return
+#   보충 계산 = 예상 재고(현재고 + 이동 입고 예정 − 반납/반출 예정) 기준 (engine.replenish)
 #   ⚠️ 옛 2-5 의 start + completed_in 은 오늘 판매·출고를 빼지 않아 재고를 부풀린다.
 def store_stock(fk_sku_ids: Iterable[int], storage_ids: Iterable[int]) -> str:
     return f"""
@@ -159,11 +161,11 @@ WITH d AS (SELECT MAX(stock_date) d FROM ocmp.scm_hub.daily_inventory
 SELECT di.fk_sku_id, di.fk_storage_id storage_id,
        CAST(SUM(di.end_quantity) AS BIGINT) stock_qty,
        CAST(SUM(di.end_available_quantity) AS BIGINT) avail_qty,
-       CAST(SUM(di.expected_in_quantity + di.moving_in_quantity + di.expected_inbound_quantity) AS BIGINT) incoming_qty,
+       CAST(SUM(di.expected_in_quantity + di.moving_in_quantity) AS BIGINT) incoming_qty,
        CAST(SUM(di.expected_in_quantity) AS BIGINT) req_in_qty,
        CAST(SUM(di.moving_in_quantity) AS BIGINT) moving_in_qty,
        CAST(SUM(di.expected_inbound_quantity) AS BIGINT) direct_in_qty,
-       CAST(SUM(di.expected_out_quantity + di.moving_out_quantity) AS BIGINT) outgoing_qty,
+       CAST(SUM(di.expected_out_quantity + di.moving_out_quantity + COALESCE(di.expected_vendor_return_quantity, 0)) AS BIGINT) outgoing_qty,
        CAST(SUM(di.end_defect_quantity) AS BIGINT) defect_qty,
        COUNT(DISTINCT CASE WHEN di.end_quantity <> 0 THEN di.fk_barcode_id END) n_barcode_with_stock,
        MAX(di.stock_date) stock_date, MAX(di.updated_at) updated_at

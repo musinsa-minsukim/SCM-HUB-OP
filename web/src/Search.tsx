@@ -14,7 +14,7 @@ export default function Search({ dark, preset }: PageProps) {
   const params = { brand, store, md, q };
   const { data, err, loading } = useApi<any>(ready ? "/rows" + qs(params) : null);
   const rows = data?.rows ?? [];
-  const sumF = ["fixed_qty", "stock_qty", "incoming_qty", "outgoing_qty", "off_cum", "off_w1", "avail_qty", "off_4w", "need_qty", "alloc_qty"];
+  const sumF = ["fixed_qty", "stock_qty", "incoming_qty", "outgoing_qty", "expected_qty", "off_cum", "off_w1", "avail_qty", "off_4w", "need_qty", "alloc_qty"];
 
   return (
     <div className="space-y-4">
@@ -34,7 +34,7 @@ export default function Search({ dark, preset }: PageProps) {
             right={loading ? <Spinner /> : null} />
           {ready && <TotalGrid dark={dark} rows={rows} height={620}
             columns={[COL.brand, COL.store, ...PRODUCT_COLS(), COL.sev, COL.bzOffline, COL.offline, COL.otherGoods, COL.barcode, COL.otherBc,
-              COL.fixed, COL.stock, COL.incoming, COL.outgoing, COL.mfs, COL.mfsIn, COL.mfsInDate, COL.mfsLate, COL.offCum, COL.off1, COL.avail, COL.off4, COL.offAll, COL.onl1,
+              COL.fixed, COL.stock, COL.incoming, COL.outgoing, COL.expected, COL.mfs, COL.mfsIn, COL.mfsInDate, COL.mfsLate, COL.offCum, COL.off1, COL.avail, COL.off4, COL.offAll, COL.onl1,
               COL.need, COL.alloc, COL.scm, COL.flags, COL.src]} />}
         </CardBody>
       </Card>

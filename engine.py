@@ -5,7 +5,7 @@
 1단계 보충 규칙 (사용자 결정 2026-09-30, 매일 보충 가능 기준):
     필요 = max(매장 고정 수량 − (판매가능 재고 + 입고 예정), 0)
     MFS 가용(mfs_qty) 안에서 매장별로 배분 — 최근 4주 매장 판매가 많은 매장 먼저, 같으면 부족분 큰 순.
-    과잉 = (판매가능 + 입고 예정) − 고정 수량 > 0 이고 4주 판매 0 → 반출 후보(자동 지시 아님, 표시만).
+    과잉 = 예상 재고(현재고 + 이동 입고 예정 − 반납/반출 예정) − 고정 수량 > 0 이고 4주 판매 0 → 반출 후보(표시만).
 2단계에서 '고정 수량' 자리를 사이즈런·판매 기반 적정 capa 로 바꾼다 → target_qty() 만 교체하면 된다.
 """
 from __future__ import annotations
@@ -300,12 +300,15 @@ def replenish(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     df["is_dup"] = df.duplicated(["storage_id", "sku_id"], keep="first") & df["storage_id"].notna()
     usable = (df["severity"] != "error") & ~df["is_dup"]
     df["target_qty"] = target_qty(df).where(usable)
-    have = df["avail_qty"] + df["incoming_qty"]
+    # 예상 재고 = 매장 현재고 + 이동 입고 예정 − 매장 반납/반출 예정 (사용자 결정 2026-10-21, '현재고 기준')
+    #   ⚠️ 판매가능(avail)에는 반납/반출 예정분이 이미 빠져 있어서 판매가능에서 또 빼면 두 번 빠진다.
+    df["expected_qty"] = df["stock_qty"] + df["incoming_qty"] - df["outgoing_qty"]
+    have = df["expected_qty"].clip(lower=0)   # 반납/반출 예정 > 현재고(23행 실측)인 음수는 0 으로 — 보충이 부풀지 않게
     df["need_qty"] = (df["target_qty"] - have).clip(lower=0).fillna(0).astype("int64")
     df["over_qty"] = (have - df["target_qty"]).clip(lower=0).fillna(0).astype("int64")
     df["return_candidate"] = (df["over_qty"] > 0) & (df["off_4w"] <= 0)
-    # 과재고 반출 가능 수량 = 판매가능 − 고정 수량 (입고 예정분은 아직 매장에 없어 반출 불가)
-    df["ret_qty"] = (df["avail_qty"] - df["target_qty"]).clip(lower=0).fillna(0).astype("int64")
+    # 과재고 반출 가능 수량 = min(판매가능, 예상 재고 − 고정) — 지금 매장에서 실제로 뺄 수 있는 만큼만
+    df["ret_qty"] = np.minimum(df["avail_qty"].clip(lower=0), df["over_qty"]).fillna(0).astype("int64")
     # 시트에 있는 매장×SKU 는 '운영' 이어야 하므로(운영상태 업로드로 전환) SCM 상태와 무관하게 배분한다.
     # 단, 이동 등록 전에 운영상태 파일을 먼저 올려야 한다 → need_ops 로 표시.
     # 보충 발주 가능 = ① 비제스트 오프라인 판매 Y + ② SCM 매장 운영중(시트에 있으면 운영상태 업로드로 전환).
@@ -398,6 +401,7 @@ def case2_rows(ops: pd.DataFrame, df: pd.DataFrame, src) -> pd.DataFrame:
         if c not in c2:          # 해당 원천 결과가 0건이면 열 자체가 없다 (예: 입고 예정 없음)
             c2[c] = 0
         c2[c] = pd.to_numeric(c2[c], errors="coerce").fillna(0).astype("int64")
+    c2["expected_qty"] = c2["stock_qty"] + c2["incoming_qty"] - c2["outgoing_qty"]
     # 브랜드 표기는 시트 파일 기준(src_file)으로 맞춘다
     b2f = df.dropna(subset=["brand_nm"]).groupby("brand_nm")["src_file"].agg(lambda s: s.mode().iat[0])
     c2["src_file"] = c2["brand_nm"].map(b2f).fillna(c2["brand_nm"])
@@ -427,7 +431,7 @@ def stock_barcodes(df: pd.DataFrame, src) -> pd.DataFrame:
 # 1순위 = 미운영 매장 재고(그 SKU 가 운영리스트에 없는 대상 매장의 판매가능 재고) → **전부** 내보낸다.
 #   ① 받는 매장 보충 필요(need_qty)를 판매 좋은 매장(7일 → 4주 → 누적)부터 채우고
 #   ② 남는 수량도 운영 매장으로 나눈다: 한 개씩 '판매 대비 재고가 가장 적은' 매장에
-#      점수 = (7일 판매×4 + 4주 판매 + 0.1) ÷ (판매가능 + 이동중 + 이번 RT 로 받은 수량 + 1)
+#      점수 = (7일 판매×4 + 4주 판매 + 0.1) ÷ (예상 재고 + 이번 RT 로 받은 수량 + 1)
 #   ③ 그 SKU 를 운영하는 매장이 하나도 없으면 → 반납(priority 3). ② 재고 보충 파일의 '과재고 반출 수량'에도 들어간다.
 #      (운영 매장은 있는데 모두 오프라인 판매 N 이면 보류 — 발주가 막혀서 RT 도 반납도 하지 않음)
 # 2순위 = 운영 매장 과재고(ret_qty = 판매가능 − 고정): 1순위로 다 못 채운 보충 필요만 채운다
@@ -452,11 +456,11 @@ def rt_plan(df: pd.DataFrame, src, extra_fks=()) -> tuple[pd.DataFrame, pd.DataF
         return pd.DataFrame(columns=RT_COLS), df
 
     dest = sheet[sheet["offline_yn"] == "Y"]
-    # 받는 매장 상태: fk → [[df index, storage_id, 보충 필요 남은 수량, 판매가능+이동중, 7일, 4주, 누적]]
+    # 받는 매장 상태: fk → [[df index, storage_id, 보충 필요 남은 수량, 예상 재고, 7일, 4주, 누적]]
     dst: dict[int, list] = {}
     for i, r in dest.iterrows():
         dst.setdefault(int(r["fk_sku_id"]), []).append(
-            [i, int(r["storage_id"]), int(r["need_qty"]), int(r["avail_qty"]) + int(r["incoming_qty"]),
+            [i, int(r["storage_id"]), int(r["need_qty"]), max(int(r["expected_qty"]), 0),
              int(r["off_w1"]), int(r["off_4w"]), int(r["off_cum"])])
 
     sids = _all_sids(src)
@@ -585,7 +589,7 @@ def rt_enrich(rt: pd.DataFrame, df: pd.DataFrame, src) -> pd.DataFrame:
     key = df[df["storage_id"].notna() & df["fk_sku_id"].notna()].drop_duplicates(["fk_sku_id", "storage_id"])
     key = key.set_index([key["fk_sku_id"].astype("int64"), key["storage_id"].astype("int64")])
     k_to = [(int(a), int(b) if pd.notna(b) else -1) for a, b in zip(rt["fk_sku_id"], rt["to_storage_id"])]
-    for c, n in (("fixed_qty", "to_fixed"), ("stock_qty", "to_stock"), ("avail_qty", "to_avail"), ("incoming_qty", "to_incoming"),
+    for c, n in (("fixed_qty", "to_fixed"), ("stock_qty", "to_stock"), ("avail_qty", "to_avail"), ("incoming_qty", "to_incoming"), ("outgoing_qty", "to_outgoing"), ("expected_qty", "to_expected"),
                  ("off_w1", "to_off_w1"), ("off_4w", "to_off_4w"), ("off_cum", "to_off_cum"), ("need_qty", "to_need"),
                  ("alloc_qty", "to_mfs_alloc")):
         rt[n] = [key[c].get(k, 0) if c in key else 0 for k in k_to]

@@ -48,8 +48,9 @@ export default function Brands({ dark, nav }: PageProps) {
     colNum("offline_n", "오프라인 판매 N", "int", { headerTooltip: "SCM-HUB 오프라인 판매 여부가 Y 가 아닌 행(보충 발주 불가). 비제스트 N + SCM 미반영 합계" }),
     colNum("fixed_pcs", "고정 운영 수량", "int"),
     colNum("stock_qty", "매장 현재고", "int"),
-    colNum("incoming_qty", "이동중 재고", "int"),
-    colNum("outgoing_qty", "매장 반납 예정", "int"),
+    colNum("incoming_qty", "이동 입고 예정", "int", { headerTooltip: "MFS → 매장: 편집샵 보충 요청 + 보충 확정 후 이동중" }),
+    colNum("outgoing_qty", "매장 반납/반출 예정", "int", { headerTooltip: "매장 → MFS·파트너사" }),
+    colNum("expected_qty", "예상 재고", "int", { headerTooltip: "매장 현재고 + 이동 입고 예정 − 매장 반납/반출 예정" }),
     colNum("mfs_qty", "MFS 재고", "int", { headerTooltip: "브랜드 운영리스트 SKU 의 MFS 재고 (SKU 별 1번만 합산)" }),
     colNum("mfs_in_qty", "MFS 입고 예정", "int", { headerTooltip: "브랜드 → MFS 입고 예정 (예정일 최근 7일 이내·이후, SKU 별 1번만 합산)" }),
     colNum("mfs_in_late_qty", "MFS 입고 지연", "int", { headerTooltip: "입고 예정일이 7일 넘게 지났는데 미입고 (SKU 별 1번만 합산)" }),
@@ -61,7 +62,7 @@ export default function Brands({ dark, nav }: PageProps) {
     colNum("return_cand", "반출 후보", "int"),
     colText("modified", "시트 수정", { minWidth: 110, valueFormatter: (p: any) => (p.value ? String(p.value).slice(0, 16).replace("T", " ") : "") }),
   ];
-  const sumFields = ["rows", "stores", "skus", "errors", "warns", "unregistered", "multi_barcode", "fixed_pcs", "stock_qty", "incoming_qty", "outgoing_qty", "mfs_qty", "off_cum", "off_w1", "need_qty", "alloc_qty", "short_qty", "return_cand"];
+  const sumFields = ["rows", "stores", "skus", "errors", "warns", "unregistered", "multi_barcode", "fixed_pcs", "stock_qty", "incoming_qty", "outgoing_qty", "expected_qty", "mfs_qty", "off_cum", "off_w1", "need_qty", "alloc_qty", "short_qty", "return_cand"];
 
   if (loading && !data) return <div className="flex justify-center p-10"><Spinner /></div>;
   return (

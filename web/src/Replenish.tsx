@@ -14,11 +14,11 @@ export default function Replenish({ dark, preset }: PageProps) {
   const rows = data?.rows ?? [];
 
   const needCols = [COL.brand, COL.store, ...PRODUCT_COLS(), COL.bzOffline, COL.offline, COL.barcode, COL.otherBc, COL.fixed, COL.stock,
-    COL.incoming, COL.outgoing, COL.mfs, COL.mfsIn, COL.mfsInDate, COL.mfsLate, COL.offCum, COL.off1, COL.avail, COL.need, COL.alloc, COL.short, COL.scm, COL.flags];
+    COL.incoming, COL.outgoing, COL.expected, COL.mfs, COL.mfsIn, COL.mfsInDate, COL.mfsLate, COL.offCum, COL.off1, COL.avail, COL.need, COL.alloc, COL.short, COL.scm, COL.flags];
   const retCols = [COL.brand, COL.store, ...PRODUCT_COLS(), COL.barcode, COL.otherBc, COL.fixed, COL.stock,
-    COL.incoming, COL.outgoing, COL.mfs, COL.mfsIn, COL.mfsInDate, COL.mfsLate, COL.offCum, COL.off1, COL.avail, COL.off4, COL.over, COL.flags];
-  const sumF = mode === "need" ? ["fixed_qty", "stock_qty", "incoming_qty", "outgoing_qty", "off_cum", "off_w1", "avail_qty", "need_qty", "alloc_qty", "short_qty"]
-    : ["fixed_qty", "stock_qty", "incoming_qty", "outgoing_qty", "off_cum", "off_w1", "avail_qty", "off_4w", "over_qty"];
+    COL.incoming, COL.outgoing, COL.expected, COL.mfs, COL.mfsIn, COL.mfsInDate, COL.mfsLate, COL.offCum, COL.off1, COL.avail, COL.off4, COL.over, COL.flags];
+  const sumF = mode === "need" ? ["fixed_qty", "stock_qty", "incoming_qty", "outgoing_qty", "expected_qty", "off_cum", "off_w1", "avail_qty", "need_qty", "alloc_qty", "short_qty"]
+    : ["fixed_qty", "stock_qty", "incoming_qty", "outgoing_qty", "expected_qty", "off_cum", "off_w1", "avail_qty", "off_4w", "over_qty"];
 
   return (
     <div className="space-y-4">
@@ -34,8 +34,8 @@ export default function Replenish({ dark, preset }: PageProps) {
           <SectionTitle
             title={mode === "need" ? `보충 필요 ${num(data?.total ?? 0)}행` : `반출 후보 ${num(data?.total ?? 0)}행`}
             sub={mode === "need"
-              ? "보충 필요 = 고정 수량 − (판매가능 + 입고 예정). 발주 조건 = ① 오프라인 판매 Y(SCM-HUB 기준, 비제스트 값은 옆 열) ② SCM 매장 운영중 — ① 이 N 이면 MFS 배분 0. MFS 배분은 매장 판매(7일 → 4주 → 누적)가 많은 매장부터 MFS 재고 안에서 나눕니다. SCM 운영 미등록 매장은 배분하지 않습니다."
-              : "과잉 = (판매가능 + 입고 예정) − 고정 수량 > 0 이면서 최근 4주 매장 판매 0. 자동 지시가 아니라 검토용입니다."}
+              ? "보충 필요 = 고정 수량 − 예상 재고(매장 현재고 + 이동 입고 예정 − 매장 반납/반출 예정). 발주 조건 = ① 오프라인 판매 Y(SCM-HUB 기준, 비제스트 값은 옆 열) ② SCM 매장 운영중 — ① 이 N 이면 MFS 배분 0. MFS 배분은 매장 판매(7일 → 4주 → 누적)가 많은 매장부터 MFS 재고 안에서 나눕니다. SCM 운영 미등록 매장은 배분하지 않습니다."
+              : "과잉 = 예상 재고 − 고정 수량 > 0 이면서 최근 4주 매장 판매 0. 반출 가능 수량은 판매가능 이내. 자동 지시가 아니라 검토용입니다."}
             right={loading ? <Spinner /> : null} />
           <TotalGrid dark={dark} rows={rows} height={620} columns={mode === "need" ? needCols : retCols} />
         </CardBody>

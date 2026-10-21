@@ -205,6 +205,7 @@ def brands(u: str = Depends(user)):
         "stock_qty": g["stock_qty"].sum(),
         "incoming_qty": g["incoming_qty"].sum(),
         "outgoing_qty": g["outgoing_qty"].sum(),
+        "expected_qty": g["expected_qty"].sum(),
         "mfs_qty": base.drop_duplicates(["src_file", "sku_id"]).groupby("src_file")["mfs_qty"].sum(),
         "mfs_in_qty": base.drop_duplicates(["src_file", "sku_id"]).groupby("src_file")["mfs_in_qty"].sum(),
         "mfs_in_late_qty": base.drop_duplicates(["src_file", "sku_id"]).groupby("src_file")["mfs_in_late_qty"].sum(),
@@ -302,7 +303,7 @@ def rows(brand: str | None = None, store: str | None = None, severity: str | Non
 CSV_COLS = {
     "brand_in": "브랜드", "store_name": "매장", "sku_id": "SKU ID", "goods_no": "UID",
     "product_name": "상품명", "option_name": "옵션명", "other_goods": "다른 연결 UID", "rep_barcode": "대표 바코드", "other_barcodes": "추가 바코드",
-    "fixed_qty": "고정 운영 수량", "stock_qty": "매장 현재고", "incoming_qty": "이동중 재고", "outgoing_qty": "매장 반납 예정", "mfs_qty": "MFS 재고", "mfs_in_qty": "MFS 입고 예정",
+    "fixed_qty": "고정 운영 수량", "stock_qty": "매장 현재고", "incoming_qty": "이동 입고 예정", "outgoing_qty": "매장 반납/반출 예정", "expected_qty": "예상 재고", "mfs_qty": "MFS 재고", "mfs_in_qty": "MFS 입고 예정",
     "mfs_in_date": "MFS 입고 예정일", "mfs_in_late_qty": "MFS 입고 지연(7일+)",
     "off_cum": "누적 판매", "off_w1": "7일 판매", "avail_qty": "판매가능", "off_4w": "매장 판매 4주", "mfs_qty": "MFS 재고", "need_qty": "보충 필요",
     "alloc_qty": "MFS 배분", "short_qty": "부족", "over_qty": "과잉", "storage_status": "SCM 매장 운영",
@@ -399,10 +400,11 @@ def _moves(ret: str, brand: str | None, store: str | None, md: str | None = None
     lines = []
 
     def stock_of(r) -> dict:
-        # 매장×SKU 단위 재고 (화면 확인용, CSV 양식에는 안 들어감). 이동중 = 출고 요청(출고 전) + 출고 후 이동중 + 직납 예정
+        # 매장×SKU 단위 재고 (화면 확인용, CSV 양식에는 안 들어감). 이동 입고 예정 = 편집샵 보충 요청 + 보충 확정 후 이동중
         g = lambda c: int(getattr(r, c, 0) or 0)
         return {"fixed_qty": g("fixed_qty"), "stock_qty": g("stock_qty"), "avail_qty": g("avail_qty"), "mfs_qty": g("mfs_qty"),
                 "incoming_qty": g("incoming_qty"), "req_in_qty": g("req_in_qty"),
+                "outgoing_qty": g("outgoing_qty"), "expected_qty": g("expected_qty"),
                 "moving_in_qty": g("moving_in_qty"), "direct_in_qty": g("direct_in_qty")}
 
     mv = df[ok & (df["alloc_qty"] > 0)]
@@ -470,7 +472,7 @@ RT_CSV = {  # RT(점간이동) 추천 CSV — SCM-HUB 전용 양식이 없어 �
     "from_stock": "보내는 매장 현재고", "from_avail": "보내는 매장 판매가능", "from_fixed": "보내는 매장 고정 운영 수량",
     "from_off_w1": "보내는 매장 7일 판매", "from_off_cum": "보내는 매장 누적 판매",
     "to_fixed": "받는 매장 고정 운영 수량", "to_stock": "받는 매장 현재고", "to_avail": "받는 매장 판매가능",
-    "to_incoming": "받는 매장 이동중 재고", "to_mfs_alloc": "받는 매장 MFS 배분", "to_need": "받는 매장 보충 필요",
+    "to_incoming": "받는 매장 이동 입고 예정", "to_outgoing": "받는 매장 반납/반출 예정", "to_expected": "받는 매장 예상 재고", "to_mfs_alloc": "받는 매장 MFS 배분", "to_need": "받는 매장 보충 필요",
     "to_off_w1": "받는 매장 7일 판매", "to_off_4w": "받는 매장 4주 판매", "to_off_cum": "받는 매장 누적 판매",
     "mfs_qty": "MFS 재고", "mfs_in_qty": "MFS 입고 예정", "note": "메모",
 }

@@ -104,7 +104,7 @@ export default function Issues({ dark, preset }: PageProps) {
           {/* 재고·판매는 브랜드 현황과 같은 6개 지표 · 같은 순서 */}
           <TotalGrid dark={dark} rows={data?.rows ?? []} height={600}
             columns={[CASE, COL.brand, COL.store, ...PRODUCT_COLS(), ACTUAL, EXPECTED, COL.bzOffline, COL.offline, COL.otherGoods, COL.sev, COL.src, COL.flags, COL.storeIn, COL.storeMatch,
-              COL.fixed, COL.stock, COL.incoming, COL.outgoing, COL.mfs, COL.mfsIn, COL.mfsInDate, COL.mfsLate, COL.offCum, COL.off1,
+              COL.fixed, COL.stock, COL.incoming, COL.outgoing, COL.expected, COL.mfs, COL.mfsIn, COL.mfsInDate, COL.mfsLate, COL.offCum, COL.off1,
               COL.barcode, COL.otherBc, SCMCODE]} />
         </CardBody>
       </Card>
