@@ -526,26 +526,56 @@ def _sync_status(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-SYNC_CSV = {"status": "상태", "uid": "UID", "brand_nm": "브랜드", "product_name": "상품명",
+SYNC_CSV = {"status": "상태", "uid": "UID", "sku_ids": "조회한 SKU ID", "brand_nm": "브랜드", "product_name": "상품명",
             "bz_offline_yn": "비제스트 오프라인 판매", "bz_offline_ut": "비제스트 변경 시각",
             "scm_offline_yn": "SCM-HUB 오프라인 판매", "scm_updated_at": "SCM-HUB 상품 갱신 시각",
             "hours_since_bz": "비제스트 변경 후 경과(시간)", "scm_sales_status": "SCM-HUB 판매상태", "bm_name": "거래형태"}
 
 
-def _uids(text: str) -> list[int]:
+def _parse_ids(text: str) -> tuple[list[int], list[str]]:
+    """붙여넣은 글에서 SKU ID(S+13자리)와 UID(숫자)를 나눠 뽑는다. SKU ID 안의 숫자를 UID 로 잘못 읽지 않게 SKU 먼저 뺀다."""
     import re
-    return sorted({int(x) for x in re.findall(r"\d{4,10}", text or "")})[:2000]
+    text = (text or "").upper()
+    skus = sorted(set(re.findall(r"S\d{13}", text)))[:2000]
+    rest = re.sub(r"S\d{13}", " ", text)
+    uids = sorted({int(x) for x in re.findall(r"\d{4,10}", rest)})[:2000]
+    return uids, skus
+
+
+def _uids(text: str) -> list[int]:
+    return _parse_ids(text)[0]
+
+
+def _sync_by_ids(text: str) -> tuple[pd.DataFrame, list[str]]:
+    """UID·SKU ID 섞어서 조회. SKU ID 는 SCM-HUB 에서 연결된 대표 UID(engine.pick_links)로 바꿔 비교하고 sku_id 열에 표시."""
+    import engine
+    uids, skus = _parse_ids(text)
+    sku_map: dict[int, list[str]] = {}
+    missing: list[str] = []
+    if skus:
+        sk = dbx.run_df(f"SELECT _id fk_sku_id, sku_id FROM ocmp.scm_hub.sku WHERE sku_id IN ({Q.str_list(skus)})")
+        missing += [x for x in skus if x not in set(sk["sku_id"])]
+        if len(sk):
+            pk = engine.pick_links(sk["fk_sku_id"].astype("int64").unique()).merge(sk, on="fk_sku_id", how="left")
+            for g, sid in zip(pk["goods_no"], pk["sku_id"]):
+                if pd.notna(g):
+                    sku_map.setdefault(int(g), []).append(sid)
+            missing += [x for x in pk.loc[pk["goods_no"].isna(), "sku_id"]]
+    ids = sorted(set(uids) | set(sku_map))
+    if not ids:
+        return pd.DataFrame(), missing
+    df = _sync_status(dbx.run_df(Q.offline_sync(ids)))
+    if len(df):
+        df.insert(1, "sku_ids", df["uid"].astype(int).map(lambda g: ", ".join(sorted(sku_map.get(g, [])))))
+    found = set(df["uid"].astype(int)) if len(df) else set()
+    missing += [str(i) for i in uids if i not in found]
+    return df, missing
 
 
 @app.get("/api/offline_sync")
 def offline_sync(uids: str = "", u: str = Depends(user)):
-    """UID 를 바로 조회 — 브랜드 운영리스트와 무관하게 비제스트 vs SCM-HUB 오프라인 판매 여부(실시간 사본)."""
-    ids = _uids(uids)
-    if not ids:
-        return {"rows": [], "total": 0}
-    df = _sync_status(dbx.run_df(Q.offline_sync(ids)))
-    found = set(df["uid"].astype(int)) if len(df) else set()
-    missing = [i for i in ids if i not in found]
+    """UID·SKU ID 를 바로 조회 — 브랜드 운영리스트와 무관하게 비제스트 vs SCM-HUB 오프라인 판매 여부."""
+    df, missing = _sync_by_ids(uids)
     return {"rows": records(df), "total": len(df), "missing": missing}
 
 
@@ -575,8 +605,7 @@ def offline_sync_csv(uids: str = "", mismatch: int = 0, brand: str | None = None
     if mismatch:
         df = _sync_status(dbx.run_df(Q.offline_sync(None, only_mismatch=True, brand=brand or None, bm=bm or None)))
     else:
-        ids = _uids(uids)
-        df = _sync_status(dbx.run_df(Q.offline_sync(ids))) if ids else pd.DataFrame()
+        df, _ = _sync_by_ids(uids)
     return _csv(df[[c for c in SYNC_CSV if c in df]].rename(columns=SYNC_CSV), "offline_sale_sync.csv")
 
 

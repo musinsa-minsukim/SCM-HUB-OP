@@ -17,6 +17,7 @@ const cols: ColDef[] = [
       : String(p.value).startsWith("SCM 미반영") ? { color: "var(--ratio-down)", fontWeight: 700 } : { color: "var(--ratio-neutral)" })) as any,
   },
   colText("uid", "UID", { minWidth: 100 }),
+  colText("sku_ids", "조회한 SKU ID", { minWidth: 150, headerTooltip: "SKU ID 로 조회했을 때, 그 SKU 가 연결된 대표 UID 로 비교했다" }),
   colText("bm_name", "거래형태", { minWidth: 80, headerTooltip: "매입 / 위탁" }),
   colText("brand_nm", "브랜드", { minWidth: 110 }),
   colText("product_name", "상품명", { minWidth: 240 }),
@@ -84,17 +85,17 @@ export default function OfflineSync({ dark }: PageProps) {
       <Freshness />
       <Card>
         <CardBody>
-          <SectionTitle title="UID 로 조회"
-            sub="브랜드 운영리스트와 상관없이, 붙여 넣은 UID 의 비제스트 오프라인 판매 여부와 SCM-HUB 반영 여부를 바로 비교합니다(위 갱신 주기의 사본 기준). 줄바꿈·쉼표·공백 어느 것으로 구분해도 됩니다."
+          <SectionTitle title="UID · SKU ID 로 조회"
+            sub="브랜드 운영리스트와 상관없이, 붙여 넣은 UID 또는 SKU ID 의 비제스트 오프라인 판매 여부와 SCM-HUB 반영 여부를 바로 비교합니다(위 갱신 주기의 사본 기준). 줄바꿈·쉼표·공백 어느 것으로 구분해도 되고 섞어도 됩니다. SKU ID 는 SCM-HUB 에서 연결된 대표 UID 로 바꿔 비교합니다."
             right={<div className="flex items-center gap-2">{one.loading && <Spinner />}{uids && one.data?.total ? <Dl href={"/api/offline_sync.csv" + qs({ uids })} /> : null}</div>} />
           <div className="mb-3 flex flex-wrap items-end gap-2">
-            <textarea value={text} onChange={(e) => setText(e.target.value)} rows={3} placeholder={"7010167\n3417694, 7252283"}
+            <textarea value={text} onChange={(e) => setText(e.target.value)} rows={3} placeholder={"7010167\nS2601130000419, 7252283"}
               className={inp + " w-full max-w-xl font-mono"} />
             <button onClick={() => setUids(text.trim())}
               className="rounded-lg bg-indigo-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-indigo-500">조회</button>
           </div>
           {one.data?.missing?.length ? (
-            <div className="mb-2 text-xs text-rose-600">비제스트에 없는 UID: {one.data.missing.join(", ")}</div>
+            <div className="mb-2 text-xs text-rose-600">찾지 못한 UID·SKU ID: {one.data.missing.join(", ")}</div>
           ) : null}
           {uids && <TotalGrid dark={dark} rows={one.data?.rows ?? []} columns={cols} height={320} sum={[]} />}
         </CardBody>
