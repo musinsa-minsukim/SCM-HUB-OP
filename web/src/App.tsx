@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, lazy, Suspense } from "react";
-import { Building2, ShieldAlert, Grid3x3, Truck, Search as SearchIcon, RefreshCw, Sun, Moon, Boxes, FileUp } from "lucide-react";
+import { Building2, ShieldAlert, Grid3x3, Truck, Search as SearchIcon, RefreshCw, Sun, Moon, Boxes, FileUp, ShieldCheck } from "lucide-react";
 import { api } from "./lib";
 import { Spinner } from "./ui";
 
@@ -8,6 +8,7 @@ const Issues = lazy(() => import("./Issues"));
 const Matrix = lazy(() => import("./Matrix"));
 const Replenish = lazy(() => import("./Replenish"));
 const Search = lazy(() => import("./Search"));
+const OfflineSync = lazy(() => import("./OfflineSync"));
 const Uploads = lazy(() => import("./Uploads"));
 
 const NAV = [
@@ -17,6 +18,7 @@ const NAV = [
   { key: "replenish", label: "보충·반출", icon: Truck },
   { key: "uploads", label: "업로드 파일", icon: FileUp },
   { key: "search", label: "상품 조회", icon: SearchIcon },
+  { key: "offsync", label: "오프라인 판매 대사", icon: ShieldCheck },
 ] as const;
 export type View = (typeof NAV)[number]["key"];
 
@@ -104,7 +106,7 @@ export default function App() {
 
   const running = !!busy || status?.job?.running;
   const kindNow = busy || (status?.job?.running ? status.job.kind : "");
-  const Page = { brands: Brands, issues: Issues, matrix: Matrix, replenish: Replenish, uploads: Uploads, search: Search }[view];
+  const Page = { brands: Brands, issues: Issues, matrix: Matrix, replenish: Replenish, uploads: Uploads, search: Search, offsync: OfflineSync }[view];
   const title = NAV.find((n) => n.key === view)?.label;
 
   return (

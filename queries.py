@@ -251,6 +251,45 @@ FROM musinsa.stock.product WHERE id IN ({int_list(goods_nos)}) GROUP BY id"""
 # ⚠️ 2026-10-20: 예전 원천 team.commercepm.mfs_stock_daily 는 매일 04시 스냅샷이라, 아침에 입고된 신상(야세 16 SKU,
 #    07:18 입고 완료)이 하루 종일 0 → MFS 배분 0 → ② 재고 보충에 안 나왔다. 실시간 합은 스냅샷과 96% 일치(나머지는 당일 입출고).
 #    스냅샷 테이블은 더 이상 쓰지 않는다(mfs_inbound_qty 는 호환용 0 — 화면의 'MFS 입고 예정'은 mfs_inbound 쿼리, 실시간).
+# ── 오프라인 판매 여부 동기화 점검 (브랜드 운영리스트와 무관, 2026-10-22 사용자 요청) ──────────────
+# 비제스트 원장(musinsa.stock.product.for_offline_sale, ut=KST 값이 UTC 표기) vs SCM-HUB product.offline_sale_enabled
+# (MUSINSA 플랫폼 행만 — 같은 product_no 의 29CM 행 제외). 둘 다 ~15분~1시간 지연 사본.
+def offline_sync(uids: Iterable[int] | None = None, only_mismatch: bool = False, brand: str | None = None) -> str:
+    cond = [f"b.id IN ({int_list(uids)})"] if uids is not None else ["b.business_model_type = 'P'"]
+    if brand:
+        cond.append(f"(b.brand_id = {lit(brand)} OR br.brand_nm = {lit(brand)})")
+    mis = ("AND p._id IS NOT NULL AND (CASE WHEN b.for_offline_sale = 1 THEN 1 ELSE 0 END) <> "
+           "(CASE WHEN p.offline_sale_enabled THEN 1 ELSE 0 END)") if only_mismatch else ""
+    return f"""
+WITH b AS (
+  SELECT id, for_offline_sale, ut, business_model_type, brand_id, company_id, default_name FROM (
+    SELECT id, for_offline_sale, ut, business_model_type, brand_id, company_id, default_name,
+           ROW_NUMBER() OVER (PARTITION BY id ORDER BY ut DESC) rn
+    FROM musinsa.stock.product) WHERE rn = 1),
+br AS (
+  SELECT brand, brand_nm FROM (
+    SELECT brand, brand_nm, ROW_NUMBER() OVER (PARTITION BY brand ORDER BY tr_ts DESC NULLS LAST, ut DESC) rn
+    FROM musinsa.partnerportal.brand WHERE Op IS NULL OR Op != 'delete') WHERE rn = 1),
+p AS (
+  SELECT _id, product_no, offline_sale_enabled, updated_at, sales_status FROM (
+    SELECT _id, product_no, offline_sale_enabled, updated_at, sales_status,
+           ROW_NUMBER() OVER (PARTITION BY product_no ORDER BY updated_at DESC) rn
+    FROM ocmp.scm_hub.product WHERE platform = 'MUSINSA') WHERE rn = 1)
+SELECT CAST(b.id AS BIGINT) uid, b.default_name product_name, br.brand_nm, b.brand_id brand, b.company_id com_id,
+       b.business_model_type bm,
+       CASE WHEN b.for_offline_sale = 1 THEN 'Y' ELSE 'N' END bz_offline_yn,
+       date_format(b.ut, 'yyyy-MM-dd HH:mm') bz_offline_ut,
+       CASE WHEN p._id IS NULL THEN '' WHEN p.offline_sale_enabled THEN 'Y' ELSE 'N' END scm_offline_yn,
+       date_format(from_utc_timestamp(p.updated_at, 'Asia/Seoul'), 'yyyy-MM-dd HH:mm') scm_updated_at,
+       p.sales_status scm_sales_status
+FROM b
+LEFT JOIN br ON br.brand = b.brand_id
+LEFT JOIN p ON p.product_no = CAST(b.id AS STRING)
+WHERE {" AND ".join(cond)} {mis}
+ORDER BY b.ut DESC
+LIMIT 20000"""
+
+
 def mfs_stock(sku_ids: Iterable[str]) -> str:
     return f"""
 WITH d AS (SELECT MAX(stock_date) d FROM ocmp.scm_hub.daily_inventory

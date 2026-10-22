@@ -21,6 +21,8 @@ from fastapi import FastAPI, Depends, Header, HTTPException, Query
 from fastapi.responses import FileResponse, Response, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+import dbx
+import queries as Q
 import refresh
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -509,6 +511,59 @@ def rt_csv(priority: str | None = None, brand: str | None = None, store: str | N
            u: str = Depends(user)):
     rt = _rt(priority, brand, store, md)
     return _csv(rt[[c for c in RT_CSV if c in rt]].rename(columns=RT_CSV), "store_transfer_rt.csv")
+
+
+def _sync_status(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+    now = pd.Timestamp(refresh._now())
+    bz_t = pd.to_datetime(df["bz_offline_ut"], errors="coerce")
+    df = df.assign(status=[
+        "SCM 상품 없음" if s == "" else ("일치" if b == s else ("SCM 미반영(비제스트 Y)" if b == "Y" else "SCM 미반영(비제스트 N)"))
+        for b, s in zip(df["bz_offline_yn"], df["scm_offline_yn"])])
+    # 비제스트에서 바꾼 뒤 지난 시간(시간) — 불일치일 때만 의미
+    df["hours_since_bz"] = ((now - bz_t).dt.total_seconds() / 3600).round(1).where(df["status"].str.startswith("SCM 미반영"))
+    return df
+
+
+SYNC_CSV = {"status": "상태", "uid": "UID", "brand_nm": "브랜드", "product_name": "상품명",
+            "bz_offline_yn": "비제스트 오프라인 판매", "bz_offline_ut": "비제스트 변경 시각",
+            "scm_offline_yn": "SCM-HUB 오프라인 판매", "scm_updated_at": "SCM-HUB 상품 갱신 시각",
+            "hours_since_bz": "비제스트 변경 후 경과(시간)", "scm_sales_status": "SCM-HUB 판매상태", "bm": "거래형태(P=위탁)"}
+
+
+def _uids(text: str) -> list[int]:
+    import re
+    return sorted({int(x) for x in re.findall(r"\d{4,10}", text or "")})[:2000]
+
+
+@app.get("/api/offline_sync")
+def offline_sync(uids: str = "", u: str = Depends(user)):
+    """UID 를 바로 조회 — 브랜드 운영리스트와 무관하게 비제스트 vs SCM-HUB 오프라인 판매 여부(실시간 사본)."""
+    ids = _uids(uids)
+    if not ids:
+        return {"rows": [], "total": 0}
+    df = _sync_status(dbx.run_df(Q.offline_sync(ids)))
+    found = set(df["uid"].astype(int)) if len(df) else set()
+    missing = [i for i in ids if i not in found]
+    return {"rows": records(df), "total": len(df), "missing": missing}
+
+
+@app.get("/api/offline_sync/mismatch")
+def offline_sync_mismatch(brand: str | None = None, u: str = Depends(user)):
+    """전체 위탁(P) 상품 중 비제스트와 SCM-HUB 오프라인 판매 여부가 다른 것(브랜드 무관)."""
+    df = _sync_status(dbx.run_df(Q.offline_sync(None, only_mismatch=True, brand=brand or None)))
+    return {"rows": records(df), "total": len(df)}
+
+
+@app.get("/api/offline_sync.csv")
+def offline_sync_csv(uids: str = "", mismatch: int = 0, brand: str | None = None, u: str = Depends(user)):
+    if mismatch:
+        df = _sync_status(dbx.run_df(Q.offline_sync(None, only_mismatch=True, brand=brand or None)))
+    else:
+        ids = _uids(uids)
+        df = _sync_status(dbx.run_df(Q.offline_sync(ids))) if ids else pd.DataFrame()
+    return _csv(df[[c for c in SYNC_CSV if c in df]].rename(columns=SYNC_CSV), "offline_sale_sync.csv")
 
 
 @app.get("/api/moves")
