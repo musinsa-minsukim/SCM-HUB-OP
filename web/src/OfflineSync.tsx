@@ -17,6 +17,7 @@ const cols: ColDef[] = [
       : String(p.value).startsWith("SCM 미반영") ? { color: "var(--ratio-down)", fontWeight: 700 } : { color: "var(--ratio-neutral)" })) as any,
   },
   colText("uid", "UID", { minWidth: 100 }),
+  colText("bm_name", "거래형태", { minWidth: 80, headerTooltip: "매입 / 위탁" }),
   colText("brand_nm", "브랜드", { minWidth: 110 }),
   colText("product_name", "상품명", { minWidth: 240 }),
   { ...colText("bz_offline_yn", "비제스트 오프라인 판매", { minWidth: 130 }), cellStyle: yn },
@@ -25,7 +26,6 @@ const cols: ColDef[] = [
   colText("scm_updated_at", "SCM-HUB 상품 갱신 시각", { minWidth: 150 }),
   colNum("hours_since_bz", "비제스트 변경 후 경과(시간)", "num", { headerTooltip: "불일치일 때만. 하루(24시간) 넘게 그대로면 SCM-HUB 연동 문의" }),
   colText("scm_sales_status", "SCM-HUB 판매상태", { minWidth: 120 }),
-  colText("bm", "거래형태", { minWidth: 80, headerTooltip: "P = 위탁, S = 매입" }),
 ];
 
 function Dl({ href }: { href: string }) {
@@ -43,7 +43,8 @@ export default function OfflineSync({ dark }: PageProps) {
   const [brand, setBrand] = useState("");
   const [bq, setBq] = useState<string | null>(null);   // null = 아직 안 불러옴
   const [st, setSt] = useState("");
-  const mis = useApi<any>(bq === null ? null : "/offline_sync/mismatch" + qs({ brand: bq }));
+  const [bm, setBm] = useState("");   // "" 전체 / P 위탁 / S 매입
+  const mis = useApi<any>(bq === null ? null : "/offline_sync/mismatch" + qs({ brand: bq, bm }));
   const misRows = (mis.data?.rows ?? []).filter((r: any) => !st || r.status === st);
   const cnt = (s: string) => (mis.data?.rows ?? []).filter((r: any) => r.status === s).length;
   const inp = "rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/25 dark:border-slate-700 dark:bg-slate-800";
@@ -71,20 +72,23 @@ export default function OfflineSync({ dark }: PageProps) {
 
       <Card>
         <CardBody>
-          <SectionTitle title={`전체 위탁 상품 불일치 ${bq === null ? "" : num(mis.data?.total ?? 0) + "개"}`}
-            sub="모든 위탁(P) 상품 중 비제스트와 SCM-HUB 오프라인 판매 여부가 다른 것(브랜드 무관, 비제스트 변경 최신순). 비제스트 Y 인데 SCM 이 N 이면 보충 발주가 막힙니다. 방금 바꾼 건 1시간쯤 기다리고, 하루 넘게 그대로면 SCM-HUB 연동 문의."
+          <SectionTitle title={`전체 상품(매입·위탁) 불일치 ${bq === null ? "" : num(mis.data?.total ?? 0) + "개"}`}
+            sub="모든 매입·위탁 상품 중 비제스트와 SCM-HUB 오프라인 판매 여부가 다른 것(브랜드 무관, 비제스트 변경 최신순). 비제스트 Y 인데 SCM 이 N 이면 보충 발주가 막힙니다. 방금 바꾼 건 1시간쯤 기다리고, 하루 넘게 그대로면 SCM-HUB 연동 문의."
             right={<div className="flex items-center gap-2">{mis.loading && <Spinner />}
               <form onSubmit={(e) => { e.preventDefault(); setBq(brand.trim()); }} className="flex gap-2">
                 <input value={brand} onChange={(e) => setBrand(e.target.value)} placeholder="브랜드명·코드 (비우면 전체)" className={inp + " w-52"} />
                 <button className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800">불러오기</button>
               </form>
-              {bq !== null && <Dl href={"/api/offline_sync.csv" + qs({ mismatch: "1", brand: bq })} />}</div>} />
+              {bq !== null && <Dl href={"/api/offline_sync.csv" + qs({ mismatch: "1", brand: bq, bm })} />}</div>} />
           {bq !== null && (
             <>
               <div className="mb-3 grid grid-cols-2 gap-3 md:grid-cols-4">
                 <Kpi label="비제스트 Y · SCM N" value={num(cnt("SCM 미반영(비제스트 Y)"))} tone={cnt("SCM 미반영(비제스트 Y)") ? "bad" : undefined} sub="보충 발주 막힘" />
                 <Kpi label="비제스트 N · SCM Y" value={num(cnt("SCM 미반영(비제스트 N)"))} />
                 <div className="col-span-2 flex flex-wrap items-center gap-1.5">
+                  {[["", "매입·위탁"], ["S", "매입"], ["P", "위탁"]].map(([v, l]) =>
+                    <Chip key={"bm" + v} active={bm === v} onClick={() => setBm(v)}>{l}</Chip>)}
+                  <span className="mx-1 text-slate-300">|</span>
                   {[["", "전체"], ["SCM 미반영(비제스트 Y)", "비제스트 Y·SCM N"], ["SCM 미반영(비제스트 N)", "비제스트 N·SCM Y"]].map(([v, l]) =>
                     <Chip key={v} active={st === v} onClick={() => setSt(v)}>{l}</Chip>)}
                 </div>

@@ -518,7 +518,7 @@ def _sync_status(df: pd.DataFrame) -> pd.DataFrame:
         return df
     now = pd.Timestamp(refresh._now())
     bz_t = pd.to_datetime(df["bz_offline_ut"], errors="coerce")
-    df = df.assign(status=[
+    df = df.assign(bm_name=df["bm"].map({"P": "위탁", "S": "매입"}).fillna(df["bm"]), status=[
         "SCM 상품 없음" if s == "" else ("일치" if b == s else ("SCM 미반영(비제스트 Y)" if b == "Y" else "SCM 미반영(비제스트 N)"))
         for b, s in zip(df["bz_offline_yn"], df["scm_offline_yn"])])
     # 비제스트에서 바꾼 뒤 지난 시간(시간) — 불일치일 때만 의미
@@ -529,7 +529,7 @@ def _sync_status(df: pd.DataFrame) -> pd.DataFrame:
 SYNC_CSV = {"status": "상태", "uid": "UID", "brand_nm": "브랜드", "product_name": "상품명",
             "bz_offline_yn": "비제스트 오프라인 판매", "bz_offline_ut": "비제스트 변경 시각",
             "scm_offline_yn": "SCM-HUB 오프라인 판매", "scm_updated_at": "SCM-HUB 상품 갱신 시각",
-            "hours_since_bz": "비제스트 변경 후 경과(시간)", "scm_sales_status": "SCM-HUB 판매상태", "bm": "거래형태(P=위탁)"}
+            "hours_since_bz": "비제스트 변경 후 경과(시간)", "scm_sales_status": "SCM-HUB 판매상태", "bm_name": "거래형태"}
 
 
 def _uids(text: str) -> list[int]:
@@ -550,16 +550,17 @@ def offline_sync(uids: str = "", u: str = Depends(user)):
 
 
 @app.get("/api/offline_sync/mismatch")
-def offline_sync_mismatch(brand: str | None = None, u: str = Depends(user)):
-    """전체 위탁(P) 상품 중 비제스트와 SCM-HUB 오프라인 판매 여부가 다른 것(브랜드 무관)."""
-    df = _sync_status(dbx.run_df(Q.offline_sync(None, only_mismatch=True, brand=brand or None)))
+def offline_sync_mismatch(brand: str | None = None, bm: str | None = None, u: str = Depends(user)):
+    """전체 매입(S)·위탁(P) 상품 중 비제스트와 SCM-HUB 오프라인 판매 여부가 다른 것(브랜드 무관). bm=P/S 로 좁힘."""
+    df = _sync_status(dbx.run_df(Q.offline_sync(None, only_mismatch=True, brand=brand or None, bm=bm or None)))
     return {"rows": records(df), "total": len(df)}
 
 
 @app.get("/api/offline_sync.csv")
-def offline_sync_csv(uids: str = "", mismatch: int = 0, brand: str | None = None, u: str = Depends(user)):
+def offline_sync_csv(uids: str = "", mismatch: int = 0, brand: str | None = None, bm: str | None = None,
+                     u: str = Depends(user)):
     if mismatch:
-        df = _sync_status(dbx.run_df(Q.offline_sync(None, only_mismatch=True, brand=brand or None)))
+        df = _sync_status(dbx.run_df(Q.offline_sync(None, only_mismatch=True, brand=brand or None, bm=bm or None)))
     else:
         ids = _uids(uids)
         df = _sync_status(dbx.run_df(Q.offline_sync(ids))) if ids else pd.DataFrame()

@@ -254,8 +254,12 @@ FROM musinsa.stock.product WHERE id IN ({int_list(goods_nos)}) GROUP BY id"""
 # ── 오프라인 판매 여부 동기화 점검 (브랜드 운영리스트와 무관, 2026-10-22 사용자 요청) ──────────────
 # 비제스트 원장(musinsa.stock.product.for_offline_sale, ut=KST 값이 UTC 표기) vs SCM-HUB product.offline_sale_enabled
 # (MUSINSA 플랫폼 행만 — 같은 product_no 의 29CM 행 제외). 둘 다 ~15분~1시간 지연 사본.
-def offline_sync(uids: Iterable[int] | None = None, only_mismatch: bool = False, brand: str | None = None) -> str:
-    cond = [f"b.id IN ({int_list(uids)})"] if uids is not None else ["b.business_model_type = 'P'"]
+def offline_sync(uids: Iterable[int] | None = None, only_mismatch: bool = False, brand: str | None = None,
+                 bm: str | None = None) -> str:
+    """bm: None = 매입(S)+위탁(P) 전체, 'P' 위탁, 'S' 매입 (2026-10-22 사용자: 매입도 필요)."""
+    cond = [f"b.id IN ({int_list(uids)})"] if uids is not None else ["b.business_model_type IN ('P', 'S')"]
+    if bm in ("P", "S"):
+        cond.append(f"b.business_model_type = {lit(bm)}")
     if brand:
         cond.append(f"(b.brand_id = {lit(brand)} OR br.brand_nm = {lit(brand)})")
     mis = ("AND p._id IS NOT NULL AND (CASE WHEN b.for_offline_sale = 1 THEN 1 ELSE 0 END) <> "
