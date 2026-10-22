@@ -549,6 +549,19 @@ def offline_sync(uids: str = "", u: str = Depends(user)):
     return {"rows": records(df), "total": len(df), "missing": missing}
 
 
+_fresh: dict = {"at": 0.0, "data": None}
+
+
+@app.get("/api/offline_sync/freshness")
+def offline_sync_freshness(u: str = Depends(user)):
+    """비제스트·SCM-HUB 사본 기준 시각 + 비제스트 → SCM-HUB 오프라인 판매 연동 지연(최근 7일). 30분 캐시."""
+    import time as _t
+    if _fresh["data"] is None or _t.time() - _fresh["at"] > 1800:
+        r = dbx.run_df(Q.offline_sync_freshness()).iloc[0].to_dict()
+        _fresh.update(at=_t.time(), data={k: (None if pd.isna(v) else (int(v) if isinstance(v, float) else v)) for k, v in r.items()})
+    return _fresh["data"]
+
+
 @app.get("/api/offline_sync/mismatch")
 def offline_sync_mismatch(brand: str | None = None, bm: str | None = None, u: str = Depends(user)):
     """전체 매입(S)·위탁(P) 상품 중 비제스트와 SCM-HUB 오프라인 판매 여부가 다른 것(브랜드 무관). bm=P/S 로 좁힘."""

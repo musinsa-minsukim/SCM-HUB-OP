@@ -294,6 +294,40 @@ ORDER BY b.ut DESC
 LIMIT 20000"""
 
 
+# 갱신 주기 표시용 (2026-10-22 사용자 요청)
+#  - 비제스트 사본(musinsa.stock.product_history, rt = KST 값이 UTC 표기) / SCM-HUB 상품 사본(product_version, updated_at UTC)
+#    둘 다 '매시 정각까지의 변경'을 한 시간 단위로 복사한다(실측).
+#  - 연동 지연 = 최근 7일 비제스트 for_offline_sale 변경 시각 → SCM-HUB 에 같은 값이 처음 나타난 시각.
+SCM_PRODUCT_VERSION = "ocmp.scm_hub_tables.product_version_1761524566"
+
+
+def offline_sync_freshness() -> str:
+    return f"""
+WITH h AS (
+  SELECT product_id, for_offline_sale f, rt,
+         LAG(for_offline_sale) OVER (PARTITION BY product_id ORDER BY rt) pf
+  FROM musinsa.stock.product_history WHERE rt >= current_timestamp() - INTERVAL 10 DAYS),
+ev AS (SELECT product_id, f, to_timestamp(date_format(rt, 'yyyy-MM-dd HH:mm:ss')) t
+       FROM h WHERE pf IS NOT NULL AND f <> pf AND rt >= current_timestamp() - INTERVAL 7 DAYS),
+v AS (SELECT product_no, offline_sale_enabled e, from_utc_timestamp(updated_at, 'Asia/Seoul') u
+      FROM {SCM_PRODUCT_VERSION} WHERE platform = 'MUSINSA' AND updated_at >= current_timestamp() - INTERVAL 8 DAYS),
+m AS (SELECT ev.product_id, ev.t, MIN(v.u) first_u
+      FROM ev LEFT JOIN v ON v.product_no = CAST(ev.product_id AS STRING) AND v.e = (ev.f = 1) AND v.u >= ev.t
+      GROUP BY 1, 2),
+now_kst AS (SELECT from_utc_timestamp(current_timestamp(), 'Asia/Seoul') n)
+SELECT
+  date_format((SELECT n FROM now_kst), 'yyyy-MM-dd HH:mm') now_kst,
+  (SELECT date_format(MAX(rt), 'yyyy-MM-dd HH:mm') FROM musinsa.stock.product_history WHERE rt >= current_timestamp() - INTERVAL 2 DAYS) bz_asof,
+  (SELECT date_format(from_utc_timestamp(MAX(updated_at), 'Asia/Seoul'), 'yyyy-MM-dd HH:mm') FROM {SCM_PRODUCT_VERSION}
+     WHERE updated_at >= current_timestamp() - INTERVAL 2 DAYS) scm_asof,
+  COUNT(*) n_events,
+  SUM(CASE WHEN first_u IS NULL THEN 1 ELSE 0 END) n_pending,
+  SUM(CASE WHEN first_u IS NULL AND t < (SELECT n FROM now_kst) - INTERVAL 24 HOURS THEN 1 ELSE 0 END) n_pending_24h,
+  ROUND(percentile((unix_timestamp(first_u) - unix_timestamp(t)) / 60, 0.5)) p50_min,
+  ROUND(percentile((unix_timestamp(first_u) - unix_timestamp(t)) / 60, 0.9)) p90_min
+FROM m"""
+
+
 def mfs_stock(sku_ids: Iterable[str]) -> str:
     return f"""
 WITH d AS (SELECT MAX(stock_date) d FROM ocmp.scm_hub.daily_inventory

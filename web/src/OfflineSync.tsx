@@ -36,6 +36,35 @@ function Dl({ href }: { href: string }) {
   );
 }
 
+const ago = (now?: string, t?: string) => {
+  if (!now || !t) return "";
+  const m = Math.round((Date.parse(now.replace(" ", "T")) - Date.parse(t.replace(" ", "T"))) / 60000);
+  return m < 60 ? `${m}분 전` : `${Math.floor(m / 60)}시간 ${m % 60}분 전`;
+};
+const dur = (m?: number | null) => (m == null ? "—" : m < 60 ? `${m}분` : `${Math.floor(m / 60)}시간 ${m % 60}분`);
+
+function Freshness() {
+  const { data: f, loading } = useApi<any>("/offline_sync/freshness");
+  return (
+    <Card>
+      <CardBody>
+        <SectionTitle title="데이터 갱신 주기"
+          sub="두 값 모두 Databricks 사본에서 읽습니다. 사본은 매시 정각까지의 변경을 한 시간 단위로 복사합니다(실측). 연동 지연은 최근 7일 동안 비제스트에서 오프라인 판매 여부를 바꾼 시각부터 SCM-HUB 에 같은 값이 처음 나타난 시각까지입니다. 30분마다 다시 계산합니다."
+          right={loading ? <Spinner /> : f ? <span className="text-xs text-slate-500">기준 {f.now_kst}</span> : null} />
+        {f && (
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
+            <Kpi label="비제스트 데이터 기준" value={f.bz_asof?.slice(11) ?? "—"} sub={`${ago(f.now_kst, f.bz_asof)} · 1시간 단위 복사`} />
+            <Kpi label="SCM-HUB 상품 데이터 기준" value={f.scm_asof?.slice(11) ?? "—"} sub={`${ago(f.now_kst, f.scm_asof)} · 1시간 단위 복사`} />
+            <Kpi label="비제스트 → SCM-HUB 연동 (중앙값)" value={dur(f.p50_min)} sub={`상위 10% ${dur(f.p90_min)} 이상`} />
+            <Kpi label="최근 7일 변경 건" value={num(f.n_events ?? 0)} sub={`아직 미반영 ${num(f.n_pending ?? 0)}건`} />
+            <Kpi label="24시간 넘게 미반영" value={num(f.n_pending_24h ?? 0)} tone={f.n_pending_24h ? "bad" : undefined} sub="SCM-HUB 연동 문의 대상" />
+          </div>
+        )}
+      </CardBody>
+    </Card>
+  );
+}
+
 export default function OfflineSync({ dark }: PageProps) {
   const [text, setText] = useState("");
   const [uids, setUids] = useState("");
@@ -52,10 +81,11 @@ export default function OfflineSync({ dark }: PageProps) {
   return (
     <div className="space-y-5">
       <ErrorBox msg={one.err || mis.err} />
+      <Freshness />
       <Card>
         <CardBody>
           <SectionTitle title="UID 로 조회"
-            sub="브랜드 운영리스트와 상관없이, 붙여 넣은 UID 의 비제스트 오프라인 판매 여부와 SCM-HUB 반영 여부를 바로 비교합니다(실시간 사본, 약 15분~1시간 지연). 줄바꿈·쉼표·공백 어느 것으로 구분해도 됩니다."
+            sub="브랜드 운영리스트와 상관없이, 붙여 넣은 UID 의 비제스트 오프라인 판매 여부와 SCM-HUB 반영 여부를 바로 비교합니다(위 갱신 주기의 사본 기준). 줄바꿈·쉼표·공백 어느 것으로 구분해도 됩니다."
             right={<div className="flex items-center gap-2">{one.loading && <Spinner />}{uids && one.data?.total ? <Dl href={"/api/offline_sync.csv" + qs({ uids })} /> : null}</div>} />
           <div className="mb-3 flex flex-wrap items-end gap-2">
             <textarea value={text} onChange={(e) => setText(e.target.value)} rows={3} placeholder={"7010167\n3417694, 7252283"}
