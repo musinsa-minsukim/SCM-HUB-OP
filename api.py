@@ -526,20 +526,33 @@ def _sync_status(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-SYNC_CSV = {"status": "상태", "uid": "UID", "sku_ids": "조회한 SKU ID", "brand_nm": "브랜드", "product_name": "상품명",
+SYNC_CSV = {"status": "상태", "matched_by": "조회 기준", "uid": "UID", "sku_ids": "조회한 SKU ID", "style_q": "조회한 스타일넘버", "brand_nm": "브랜드", "product_name": "상품명",
             "bz_offline_yn": "비제스트 오프라인 판매", "bz_offline_ut": "비제스트 변경 시각",
             "scm_offline_yn": "SCM-HUB 오프라인 판매", "scm_updated_at": "SCM-HUB 상품 갱신 시각",
             "hours_since_bz": "비제스트 변경 후 경과(시간)", "scm_sales_status": "SCM-HUB 판매상태", "bm_name": "거래형태"}
 
 
-def _parse_ids(text: str) -> tuple[list[int], list[str]]:
-    """붙여넣은 글에서 SKU ID(S+13자리)와 UID(숫자)를 나눠 뽑는다. SKU ID 안의 숫자를 UID 로 잘못 읽지 않게 SKU 먼저 뺀다."""
+def _parse_ids(text: str) -> tuple[list[int], list[str], list[str]]:
+    """붙여넣은 글 → (UID, SKU ID, 스타일넘버).
+    줄바꿈·쉼표·세미콜론·탭으로 나눈다. 한 줄 안의 공백은, 조각이 전부 UID/SKU ID 모양일 때만 나눈다
+    (스타일넘버에 공백이 들어가는 경우가 있어서). SKU ID = S+13자리, UID = 숫자 4~10자리, 나머지 = 스타일넘버.
+    숫자만으로 된 스타일넘버도 있어서 숫자 조각은 UID 와 스타일넘버 양쪽으로 찾는다."""
     import re
-    text = (text or "").upper()
-    skus = sorted(set(re.findall(r"S\d{13}", text)))[:2000]
-    rest = re.sub(r"S\d{13}", " ", text)
-    uids = sorted({int(x) for x in re.findall(r"\d{4,10}", rest)})[:2000]
-    return uids, skus
+    sku_re, uid_re = re.compile(r"^S\d{13}$"), re.compile(r"^\d{4,10}$")
+    toks: list[str] = []
+    for piece in re.split(r"[\n,;\t]+", (text or "").upper()):
+        piece = piece.strip()
+        if not piece:
+            continue
+        parts = piece.split()
+        if len(parts) > 1 and all(sku_re.match(p) or uid_re.match(p) for p in parts):
+            toks += parts
+        else:
+            toks.append(piece)
+    skus = sorted({t for t in toks if sku_re.match(t)})[:2000]
+    uids = sorted({int(t) for t in toks if uid_re.match(t)})[:2000]
+    styles = sorted({t for t in toks if not sku_re.match(t)})[:500]   # 숫자 조각도 스타일 후보
+    return uids, skus, styles
 
 
 def _uids(text: str) -> list[int]:
@@ -547,10 +560,12 @@ def _uids(text: str) -> list[int]:
 
 
 def _sync_by_ids(text: str) -> tuple[pd.DataFrame, list[str]]:
-    """UID·SKU ID 섞어서 조회. SKU ID 는 SCM-HUB 에서 연결된 대표 UID(engine.pick_links)로 바꿔 비교하고 sku_id 열에 표시."""
+    """UID·SKU ID·스타일넘버 섞어서 조회.
+    SKU ID 는 SCM-HUB 대표 UID(engine.pick_links), 스타일넘버는 비제스트 style_number 로 UID 를 찾아 비교한다."""
     import engine
-    uids, skus = _parse_ids(text)
+    uids, skus, styles = _parse_ids(text)
     sku_map: dict[int, list[str]] = {}
+    sty_map: dict[int, list[str]] = {}
     missing: list[str] = []
     if skus:
         sk = dbx.run_df(f"SELECT _id fk_sku_id, sku_id FROM ocmp.scm_hub.sku WHERE sku_id IN ({Q.str_list(skus)})")
@@ -561,20 +576,43 @@ def _sync_by_ids(text: str) -> tuple[pd.DataFrame, list[str]]:
                 if pd.notna(g):
                     sku_map.setdefault(int(g), []).append(sid)
             missing += [x for x in pk.loc[pk["goods_no"].isna(), "sku_id"]]
-    ids = sorted(set(uids) | set(sku_map))
+    hit_styles: set[str] = set()
+    if styles:
+        # ① 비제스트 상품 스타일넘버
+        st = dbx.run_df(Q.uids_by_style(styles))
+        for g, sn in zip(st["uid"], st["style_number"]):
+            key = str(sn).strip().upper()
+            sty_map.setdefault(int(g), []).append(key)
+            hit_styles.add(key)
+        # ② SCM-HUB SKU 스타일넘버(sku_style_no) → 대표 UID — 비제스트 표기와 다른 경우가 있다(예: KNCH647)
+        ss = dbx.run_df(f"SELECT _id fk_sku_id, upper(trim(sku_style_no)) sn FROM ocmp.scm_hub.sku "
+                        f"WHERE upper(trim(sku_style_no)) IN ({Q.str_list(styles)}) LIMIT 20000")
+        if len(ss):
+            pk = engine.pick_links(ss["fk_sku_id"].astype("int64").unique()).merge(ss, on="fk_sku_id", how="left")
+            for g, sn in zip(pk["goods_no"], pk["sn"]):
+                if pd.notna(g):
+                    sty_map.setdefault(int(g), []).append(sn)
+                    hit_styles.add(sn)
+    ids = sorted(set(uids) | set(sku_map) | set(sty_map))
     if not ids:
-        return pd.DataFrame(), missing
+        return pd.DataFrame(), missing + [x for x in styles if not x.isdigit()]
     df = _sync_status(dbx.run_df(Q.offline_sync(ids)))
     if len(df):
-        df.insert(1, "sku_ids", df["uid"].astype(int).map(lambda g: ", ".join(sorted(sku_map.get(g, [])))))
+        g = df["uid"].astype(int)
+        df.insert(1, "sku_ids", g.map(lambda x: ", ".join(sorted(sku_map.get(x, [])))))
+        df.insert(2, "style_q", g.map(lambda x: ", ".join(sorted(set(sty_map.get(x, []))))))
+        df.insert(0, "matched_by", [" · ".join(k for k, ok in (("UID", x in uids), ("SKU ID", x in sku_map), ("스타일넘버", x in sty_map)) if ok)
+                                     for x in g])
     found = set(df["uid"].astype(int)) if len(df) else set()
-    missing += [str(i) for i in uids if i not in found]
+    # 숫자 조각은 UID 로도 스타일로도 못 찾았을 때만 '못 찾음'
+    missing += [str(i) for i in uids if i not in found and str(i) not in hit_styles]
+    missing += [x for x in styles if not x.isdigit() and x not in hit_styles]
     return df, missing
 
 
 @app.get("/api/offline_sync")
 def offline_sync(uids: str = "", u: str = Depends(user)):
-    """UID·SKU ID 를 바로 조회 — 브랜드 운영리스트와 무관하게 비제스트 vs SCM-HUB 오프라인 판매 여부."""
+    """UID·SKU ID·스타일넘버로 바로 조회 — 브랜드 운영리스트와 무관하게 비제스트 vs SCM-HUB 오프라인 판매 여부."""
     df, missing = _sync_by_ids(uids)
     return {"rows": records(df), "total": len(df), "missing": missing}
 

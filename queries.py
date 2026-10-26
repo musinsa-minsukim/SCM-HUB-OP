@@ -328,6 +328,16 @@ SELECT
 FROM m"""
 
 
+def uids_by_style(styles: Iterable[str]) -> str:
+    """스타일넘버 → UID (비제스트 상품 원장 style_number, 대소문자·앞뒤 공백 무시, 정확히 일치)."""
+    return f"""
+SELECT CAST(id AS BIGINT) uid, style_number FROM (
+  SELECT id, style_number, ROW_NUMBER() OVER (PARTITION BY id ORDER BY ut DESC) rn
+  FROM musinsa.stock.product
+  WHERE upper(trim(style_number)) IN ({str_list(s.strip().upper() for s in styles)})) WHERE rn = 1
+LIMIT 5000"""
+
+
 def mfs_stock(sku_ids: Iterable[str]) -> str:
     return f"""
 WITH d AS (SELECT MAX(stock_date) d FROM ocmp.scm_hub.daily_inventory
