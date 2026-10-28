@@ -86,7 +86,11 @@ def run(kind: str = "full") -> dict:
     else:
         rows = pd.read_pickle(rows_p)
         files = prev.get("files", [])
-        purchase_meta = prev.get("purchase", {})
+        try:   # 매입 시트는 그대로, ERP 재고만 다시
+            purchase_meta = purchase.rebuild(CACHE_DIR, prev.get("purchase", {}))
+            purchase_meta["at"] = prev.get("purchase", {}).get("at", "")
+        except Exception as e:  # noqa: BLE001
+            purchase_meta = {**prev.get("purchase", {}), "error": str(e)[:300]}
     md_by_brand = tb.dropna(subset=["brand_nm"]).groupby("brand_nm").agg(
         offline_md=("offline_md_id", lambda s: ", ".join(sorted({x for x in s if isinstance(x, str) and x})) or "미지정"),
         target_reason=("target_reason", "first")).to_dict("index")

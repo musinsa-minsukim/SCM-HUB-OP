@@ -650,7 +650,9 @@ def offline_sync_csv(uids: str = "", mismatch: int = 0, brand: str | None = None
 # ── 매입(무신사 스탠다드 등) 운영 시트 전개 — 1단계 (purchase.py) ─────────────────
 PUR_CSV = {"brand_in": "브랜드", "store_name": "매장", "storage_no": "스토어코드", "lgort": "ERP 저장위치",
            "uid": "UID", "product_name": "상품명", "category": "대카테", "size": "사이즈", "sku_id": "SKU ID",
-           "fixed_qty": "매장 적정 수량", "storage_status": "SCM 매장 등록 상태", "offline_yn": "오프라인 판매(SCM)",
+           "fixed_qty": "매장 적정 수량", "erp_stock_qty": "매장 현재고(ERP)", "erp_avail_qty": "매장 가용(ERP)",
+           "erp_transfer_qty": "이동중(ERP)", "hub1000_qty": "허브1000", "hub1700_qty": "허브1700",
+           "need_qty": "보충 필요(참고)", "over_qty": "과잉(참고)", "storage_status": "SCM 매장 등록 상태", "offline_yn": "오프라인 판매(SCM)",
            "sales_status": "SCM 판매상태", "uid_sizes": "상품 실제 사이즈", "severity": "검증", "flags_text": "확인 사항",
            "src_row": "원본 행", "store_in": "시트 매장명"}
 
@@ -680,7 +682,9 @@ def purchase_rows(store: str | None = None, q: str | None = None, severity: str 
     base = _extra("purchase_rows.parquet")
     by_store = (base.groupby("store_name").agg(skus=("sku_id", lambda s: s[s != ""].nunique()), uids=("uid", "nunique"),
                                                pcs=("fixed_qty", lambda s: float(pd.to_numeric(s, errors="coerce").sum())),
-                                               errors=("severity", lambda s: int((s == "error").sum())))
+                                               errors=("severity", lambda s: int((s == "error").sum())),
+                                               avail=("erp_avail_qty", lambda s: float(pd.to_numeric(s, errors="coerce").sum())) if "erp_avail_qty" in base else ("severity", lambda s: 0),
+                                               need=("need_qty", lambda s: float(pd.to_numeric(s, errors="coerce").sum())) if "need_qty" in base else ("severity", lambda s: 0))
                 .reset_index().to_dict("records")) if len(base) else []
     flags = (pd.Series([f for t in base["flags_text"] for f in t.split(" / ") if f]).value_counts().to_dict()) if len(base) else {}
     return {"rows": records(df), "total": len(df), "meta": meta.get("purchase", {}), "by_store": by_store,

@@ -137,6 +137,43 @@ LEFT JOIN ocmp.scm_hub.sku s ON s._id = spo.fk_sku_id
 WHERE p.platform = 'MUSINSA' AND p.product_no IN ({Q.str_list(uids)})"""
 
 
+# ── 매입 재고 = ERP (2026-10-29 사용자 결정: "1번은 ERP 재고로") ─────────────────────────────
+# 매장: ocmp.moss.sap_inventory (plant 1000, storage_location = 시트 14행 lgort). A1 전체적재 매일 ~10시 + M1 증분 수시.
+#   키(plant, sloc, material_no, batch_no) 중복(옵션 매핑 바뀐 옛 행) → 최신 1행만, delete_indicator 'X' 제외.
+#   available_stock = 가용(판매가능), current_stock = 현재고, transfer_stock = 이동중(ERP).
+# 허브: team.partner.raw_erp_stock 최신 dt(매일 10:01 KST 적재 — 하루 1번) — 1000 (2000,2010,2020,2060) + 1700 (2000).
+#   ⚠️ 허브 1000 은 LIKE '20%' 금지(신규 창고 과대계상).
+# 키 = UID(goods_no) + 사이즈(option_name / goods_opt, 대문자·공백 제거).
+def erp_store_stock(uids, lgorts) -> str:
+    return f"""
+WITH s AS (
+  SELECT plant_code, storage_location, goods_no, option_name, available_stock, current_stock, transfer_stock, reserved_stock,
+         modified_at,
+         ROW_NUMBER() OVER (PARTITION BY plant_code, storage_location, material_no, batch_no
+                            ORDER BY modified_at DESC, version DESC, id DESC) rn
+  FROM ocmp.moss.sap_inventory
+  WHERE plant_code = '1000' AND storage_location IN ({Q.str_list(lgorts)}) AND goods_no IN ({Q.str_list(uids)})
+    AND COALESCE(delete_indicator, '') <> 'X')
+SELECT storage_location lgort, CAST(goods_no AS BIGINT) uid, upper(trim(option_name)) size,
+       CAST(SUM(available_stock) AS BIGINT) erp_avail_qty, CAST(SUM(current_stock) AS BIGINT) erp_stock_qty,
+       CAST(SUM(transfer_stock) AS BIGINT) erp_transfer_qty, CAST(SUM(reserved_stock) AS BIGINT) erp_reserved_qty,
+       date_format(MAX(modified_at), 'yyyy-MM-dd HH:mm') erp_store_at
+FROM s WHERE rn = 1 GROUP BY 1, 2, 3"""
+
+
+def erp_hub_stock(uids) -> str:
+    return f"""
+WITH le AS (SELECT MAX(dt) d FROM team.partner.raw_erp_stock)
+SELECT CAST(r.goods_no AS BIGINT) uid, upper(trim(r.goods_opt)) size,
+       CAST(SUM(CASE WHEN r.store_cd = '1000' THEN r.wqty ELSE 0 END) AS BIGINT) hub1000_qty,
+       CAST(SUM(CASE WHEN r.store_cd = '1700' THEN r.wqty ELSE 0 END) AS BIGINT) hub1700_qty,
+       MAX(r.dt) hub_dt
+FROM team.partner.raw_erp_stock r JOIN le ON r.dt = le.d
+WHERE r.goods_no IN ({Q.str_list(uids)})
+  AND ((r.store_cd = '1000' AND r.lgort IN ('2000', '2010', '2020', '2060')) OR (r.store_cd = '1700' AND r.lgort = '2000'))
+GROUP BY 1, 2"""
+
+
 def build(rows: pd.DataFrame) -> pd.DataFrame:
     df = rows.copy()
     df["flags"] = [[] for _ in range(len(df))]
@@ -184,6 +221,33 @@ def build(rows: pd.DataFrame) -> pd.DataFrame:
     if "storage_status" not in df:
         df["storage_status"] = None
     flag(df["sku_id"].notna() & df["storage_id"].notna() & df["storage_status"].isna(), "SCM 매장 등록 없음")
+    # ERP 재고 (매장·허브)
+    uids_s = [str(int(u)) for u in uids]
+    lg = sorted({str(x) for x in df["lgort"].dropna() if str(x)})
+    if uids_s and lg:
+        progress.step("매입: ERP 매장 재고")
+        es = dbx.run_df(erp_store_stock(uids_s, lg))
+        if len(es):
+            es = es.assign(lgort=es["lgort"].astype(str), uid=es["uid"].astype("int64"), size=es["size"].astype(str))
+            df = df.merge(es, left_on=[df["lgort"].astype(str), df["uid_k"].astype("float").astype("Int64").astype("float"), df["size"]],
+                          right_on=[es["lgort"], es["uid"].astype("float"), es["size"]], how="left", suffixes=("", "_es"))
+            df = df.drop(columns=[c for c in df.columns if c.startswith("key_") or c.endswith("_es")], errors="ignore")
+    if uids_s:
+        progress.step("매입: ERP 허브 재고")
+        hs = dbx.run_df(erp_hub_stock(uids_s))
+        if len(hs):
+            hs = hs.assign(size=hs["size"].astype(str), uid_k=hs["uid"].astype("int64").astype("float"))
+            df = df.assign(_u=df["uid_k"].astype("float")).merge(hs.drop(columns=["uid"]).rename(columns={"uid_k": "_u"}),
+                                                                 on=["_u", "size"], how="left").drop(columns=["_u"])
+    for c in ("erp_avail_qty", "erp_stock_qty", "erp_transfer_qty", "erp_reserved_qty", "hub1000_qty", "hub1700_qty"):
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0).astype("int64") if c in df else 0
+    df["hub_qty"] = df["hub1000_qty"] + df["hub1700_qty"]
+    # 참고용 보충 필요(1단계 계산 — ERP 이동중·입고 예정은 다음 단계에서 정교화): 적정 − (가용 + ERP 이동중)
+    fq = pd.to_numeric(df["fixed_qty"], errors="coerce").fillna(0)
+    have = df["erp_avail_qty"] + df["erp_transfer_qty"]
+    ok = df["sku_id"].notna() & df["storage_id"].notna()
+    df["need_qty"] = (fq - have).clip(lower=0).where(ok, 0).astype("int64")
+    df["over_qty"] = (have - fq).clip(lower=0).where(ok, 0).astype("int64")
     df["severity"] = df["flags"].map(lambda fs: "error" if any(SEVERITY[f] == "error" for f in fs)
                                      else "warn" if any(SEVERITY[f] == "warn" for f in fs) else "info" if fs else "ok")
     df["flags_text"] = df["flags"].map(" / ".join)
@@ -191,7 +255,10 @@ def build(rows: pd.DataFrame) -> pd.DataFrame:
     df["product_name"] = df["product_name"].fillna(df["product_name_in"])
     keep = ["brand_in", "store_name", "storage_no", "storage_id", "shop_no", "store_in", "lgort", "store_match",
             "uid", "product_name", "category", "size", "option_name", "sku_id", "fixed_qty", "purchase_type",
-            "sales_status", "offline_yn", "storage_status", "uid_sizes", "severity", "flags_text", "src_row"]
+            "sales_status", "offline_yn", "storage_status",
+            "erp_stock_qty", "erp_avail_qty", "erp_transfer_qty", "erp_reserved_qty", "hub1000_qty", "hub1700_qty", "hub_qty",
+            "need_qty", "over_qty", "erp_store_at", "hub_dt",
+            "uid_sizes", "severity", "flags_text", "src_row"]
     return df[[c for c in keep if c in df]].reset_index(drop=True)
 
 
@@ -209,7 +276,21 @@ def run(cache_dir: str) -> dict:
         except Exception as e:  # 매입 시트 실패가 위탁 새로고침을 막지 않게
             st.update(status="읽기 실패", detail=str(e)[:300])
         files.append(st)
-    out = build(pd.concat(frames, ignore_index=True)) if frames else pd.DataFrame()
+    raw = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    raw.to_pickle(os.path.join(cache_dir, "purchase_sheet_rows.pkl"))
+    return _save(cache_dir, build(raw) if len(raw) else pd.DataFrame(), files)
+
+
+def rebuild(cache_dir: str, prev: dict) -> dict:
+    """시트는 다시 읽지 않고(저장해 둔 원본 행) ERP 재고·SKU·매장 상태만 다시 붙인다 — 어떤 새로고침 버튼이든 재고는 매번 새로."""
+    p = os.path.join(cache_dir, "purchase_sheet_rows.pkl")
+    if not os.path.exists(p):
+        return prev or {}
+    raw = pd.read_pickle(p)
+    return _save(cache_dir, build(raw) if len(raw) else pd.DataFrame(), (prev or {}).get("files", []))
+
+
+def _save(cache_dir: str, out: pd.DataFrame, files: list) -> dict:
     o = out.copy()
     for c in o.columns:
         if o[c].dtype == object:
@@ -218,5 +299,7 @@ def run(cache_dir: str) -> dict:
     summ = {"rows": len(out), "uids": int(out["uid"].nunique()) if len(out) else 0,
             "skus": int(out["sku_id"].nunique()) if len(out) else 0,
             "stores": int(out["store_name"].nunique()) if len(out) else 0,
-            "by_severity": out["severity"].value_counts().to_dict() if len(out) else {}}
+            "by_severity": out["severity"].value_counts().to_dict() if len(out) else {},
+            "erp_store_at": str(out["erp_store_at"].dropna().max()) if len(out) and "erp_store_at" in out and out["erp_store_at"].notna().any() else "",
+            "hub_dt": str(out["hub_dt"].dropna().max()) if len(out) and "hub_dt" in out and out["hub_dt"].notna().any() else ""}
     return {"files": files, "summary": summ}
