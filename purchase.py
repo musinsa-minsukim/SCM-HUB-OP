@@ -52,9 +52,28 @@ def read_values(sheet: dict) -> list[list]:
         ws = wb[sheet["tab"]]
         return [list(r) for r in ws.iter_rows(min_row=1, max_col=80, values_only=True)]
     import sheets
+
+    def get_column_letter(n: int) -> str:   # 1 → A, 27 → AA (배포 환경엔 openpyxl 이 없다)
+        out = ""
+        while n:
+            n, r = divmod(n - 1, 26)
+            out = chr(65 + r) + out
+        return out
     sess = sheets._session()
-    r = sheets._get(sess, f"https://sheets.googleapis.com/v4/spreadsheets/{sheet['file_id']}/values/'{sheet['tab']}'!A1:CB8000",
-                    params={"valueRenderOption": "UNFORMATTED_VALUE"})
+    # ⚠️ 탭 크기(행·열)보다 큰 범위를 요청하면 Sheets API 가 400(exceeds grid limits)을 낸다 → 탭 크기를 먼저 읽는다
+    meta = sess.get(f"https://sheets.googleapis.com/v4/spreadsheets/{sheet['file_id']}",
+                    params={"fields": "sheets.properties(title,gridProperties)"})
+    if meta.status_code >= 400:
+        raise RuntimeError(f"시트 정보 읽기 실패 HTTP {meta.status_code}: {meta.text[:200]}")
+    props = next((s["properties"] for s in meta.json().get("sheets", []) if s["properties"]["title"] == sheet["tab"]), None)
+    if props is None:
+        raise RuntimeError(f"'{sheet['tab']}' 탭 없음")
+    gp = props.get("gridProperties", {})
+    rng = f"'{sheet['tab']}'!A1:{get_column_letter(min(gp.get('columnCount', 80), 200))}{min(gp.get('rowCount', 8000), 20000)}"
+    r = sess.get(f"https://sheets.googleapis.com/v4/spreadsheets/{sheet['file_id']}/values/{rng}",
+                 params={"valueRenderOption": "UNFORMATTED_VALUE"})
+    if r.status_code >= 400:
+        raise RuntimeError(f"값 읽기 실패 HTTP {r.status_code}: {r.text[:200]}")
     return r.json().get("values", [])
 
 

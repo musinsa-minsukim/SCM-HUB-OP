@@ -86,9 +86,13 @@ def run(kind: str = "full") -> dict:
     else:
         rows = pd.read_pickle(rows_p)
         files = prev.get("files", [])
-        try:   # 매입 시트는 그대로, ERP 재고만 다시
-            purchase_meta = purchase.rebuild(CACHE_DIR, prev.get("purchase", {}))
-            purchase_meta["at"] = prev.get("purchase", {}).get("at", "")
+        try:   # 매입 시트는 그대로, ERP 재고만 다시 — 아직 한 번도 안 읽었으면 시트부터 읽는다
+            if os.path.exists(os.path.join(CACHE_DIR, "purchase_sheet_rows.pkl")):
+                purchase_meta = purchase.rebuild(CACHE_DIR, prev.get("purchase", {}))
+                purchase_meta["at"] = prev.get("purchase", {}).get("at", "")
+            else:
+                purchase_meta = purchase.run(CACHE_DIR)
+                purchase_meta["at"] = _now()
         except Exception as e:  # noqa: BLE001
             purchase_meta = {**prev.get("purchase", {}), "error": str(e)[:300]}
     md_by_brand = tb.dropna(subset=["brand_nm"]).groupby("brand_nm").agg(

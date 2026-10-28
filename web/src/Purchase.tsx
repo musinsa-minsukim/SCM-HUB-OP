@@ -105,6 +105,11 @@ export default function Purchase({ dark }: PageProps) {
   return (
     <div className="space-y-5">
       <ErrorBox msg={err || m.error} />
+      {!loading && !m.at && !m.error && (
+        <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
+          매입 시트를 아직 읽지 않았습니다. 위 새로고침(전체·브랜드 시트·SCM-HUB·비제스트 아무거나)을 한 번 눌러 주세요.
+        </div>
+      )}
       <Card>
         <CardBody>
           <SectionTitle title="매입 운영 시트 → 매장 × SKU ID"
