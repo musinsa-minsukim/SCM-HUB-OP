@@ -25,7 +25,8 @@ import queries as Q
 
 # 매입 시트 목록 — (브랜드 표시명, 파일 id, 탭 이름). 늘어나면 여기(또는 env PURCHASE_SHEETS JSON)에 추가.
 PURCHASE_SHEETS = json.loads(os.environ.get("PURCHASE_SHEETS", "null") or "null") or [
-    {"brand": "무신사 스탠다드", "file_id": "15mZKH9Vh4SLsl2Jb3m3TTrENEckGt9maeE5chJr2sus", "tab": "2. 매장별 SKU산정"},
+    {"brand": "무신사 스탠다드", "brand_id": "musinsastandard",
+     "file_id": "15mZKH9Vh4SLsl2Jb3m3TTrENEckGt9maeE5chJr2sus", "tab": "2. 매장별 SKU산정"},
 ]
 SIZE_RE = re.compile(r"^(FREE|F|ONE ?SIZE|OS|XXS|XS|S|M|L|XL|XXL|XXXL|2XL|3XL|\d{2,3}(\.\d)?)$", re.I)
 
@@ -174,6 +175,79 @@ WHERE r.goods_no IN ({Q.str_list(uids)})
 GROUP BY 1, 2"""
 
 
+# ── 허브 → 매장 ERP 재고이동(STO) 진행분 (2026-10-29, erp-inventory-move-flow 스킬 기준) ──────────
+#   편집샵 보충 요청      = 이동지시(iif_sap_sto MSTAT 5) − 그 지시의 반출(oif_sap_str 313), MVNO·MVITEM 별, 최근 30일 지시만
+#                          (오래된 미출고 지시가 쌓여 부풀지 않게)
+#   보충 확정 후 이동중    = 반출 313 누적 − 매장 입고 315(shkzg S) 누적, 음수는 0 (315 는 MVNO 가 없어 문서별 매칭 불가 →
+#                          매장×UID×사이즈 누적 차이. 다른 경로 입고 때문에 음수가 나올 수 있다)
+#   매장 코드 = (WERKS 1000, lgort) 쌍. 315(erp_inout_bound)는 플랜트가 없어 lgort 로만.
+def erp_moves(uids, lgorts) -> str:
+    pairs = [f"1000-{x}" for x in lgorts]
+    return f"""
+WITH o AS (
+  SELECT GR_LGORT lgort, MVNO, MVITEM, S_MATNR uid, upper(trim(OPTION)) size, SUM(CAST(MENGE AS DOUBLE)) q, MIN(INS_DATE) d
+  FROM pbo.moms.iif_sap_sto
+  WHERE CONCAT(WERKS, '-', GR_LGORT) IN ({Q.str_list(pairs)}) AND MSTAT = '5' AND (CANC IS NULL OR CANC = '')
+    AND S_MATNR IN ({Q.str_list(uids)})
+  GROUP BY 1, 2, 3, 4, 5),
+g AS (
+  SELECT GR_LGORT lgort, MVNO, MVITEM, S_MATNR uid, upper(trim(OPTION)) size, SUM(CAST(MENGE AS DOUBLE)) q
+  FROM pbo.moms.oif_sap_str
+  WHERE CONCAT(WERKS, '-', GR_LGORT) IN ({Q.str_list(pairs)}) AND BWART = '313' AND (CANC IS NULL OR CANC = '')
+    AND S_MATNR IN ({Q.str_list(uids)})
+  GROUP BY 1, 2, 3, 4, 5),
+r AS (
+  SELECT lgort, zz_smatnr uid, upper(trim(zz_option)) size, SUM(CAST(menge AS DOUBLE)) q
+  FROM musinsa.stock.erp_inout_bound
+  WHERE lgort IN ({Q.str_list(lgorts)}) AND bwart = '315' AND shkzg = 'S' AND zz_smatnr IN ({Q.str_list(uids)})
+  GROUP BY 1, 2, 3),
+pend AS (
+  SELECT o.lgort, o.uid, o.size, SUM(GREATEST(o.q - COALESCE(g.q, 0), 0)) req_q
+  FROM o LEFT JOIN g ON g.lgort = o.lgort AND g.MVNO = o.MVNO AND g.MVITEM = o.MVITEM
+  WHERE substr(o.d, 1, 8) >= date_format(date_sub(current_date(), 30), 'yyyyMMdd')
+  GROUP BY 1, 2, 3),
+gs AS (SELECT lgort, uid, size, SUM(q) q FROM g GROUP BY 1, 2, 3),
+k AS (SELECT lgort, uid, size FROM pend UNION SELECT lgort, uid, size FROM gs UNION SELECT lgort, uid, size FROM r)
+SELECT k.lgort, CAST(k.uid AS BIGINT) uid, k.size,
+       CAST(COALESCE(pend.req_q, 0) AS BIGINT) req_in_qty,
+       CAST(GREATEST(COALESCE(gs.q, 0) - COALESCE(r.q, 0), 0) AS BIGINT) moving_in_qty
+FROM k LEFT JOIN pend ON pend.lgort = k.lgort AND pend.uid = k.uid AND pend.size = k.size
+LEFT JOIN gs ON gs.lgort = k.lgort AND gs.uid = k.uid AND gs.size = k.size
+LEFT JOIN r ON r.lgort = k.lgort AND r.uid = k.uid AND r.size = k.size"""
+
+
+# 매입 매장 판매 — moss 주문 goods_no + 옵션명(= 사이즈), 순판매(완료 − 환불). 주차 정의는 위탁(queries.offline_sales)과 같다.
+def purchase_sales(uids) -> str:
+    wk = lambda a, b: f"l.d BETWEEN date_sub({Q.KST_TODAY}, {a}) AND date_sub({Q.KST_TODAY}, {b})"
+    return f"""
+WITH oo AS (SELECT order_id, goods_no, upper(trim(option_name)) size, quantity FROM ocmp.moss.order_option
+            WHERE goods_no IN ({Q.str_list(uids)})),
+ord AS (SELECT CAST(COALESCE(om.transaction_at, om.created_at) AS DATE) d, om.shop_no, oo.goods_no, oo.size, 1 sgn, oo.quantity q
+        FROM oo JOIN ocmp.moss.order_master om ON om.order_id = oo.order_id WHERE om.dummy_order = 0 AND om.order_status = 50),
+ref AS (SELECT rc.d, om.shop_no, oo.goods_no, oo.size, -1 sgn, oo.quantity q
+        FROM (SELECT order_id, CAST(created_at AS DATE) d FROM ocmp.moss.claim WHERE claim_type = 'REFUND' GROUP BY 1, 2) rc
+        JOIN ocmp.moss.order_master om ON om.order_id = rc.order_id JOIN oo ON oo.order_id = rc.order_id WHERE om.dummy_order = 0),
+l AS (SELECT * FROM ord UNION ALL SELECT * FROM ref)
+SELECT CAST(l.goods_no AS BIGINT) uid, l.size, CAST(l.shop_no AS INT) shop_no,
+  CAST(SUM(CASE WHEN {wk(7, 1)} THEN l.sgn*l.q ELSE 0 END) AS BIGINT) off_w1,
+  CAST(SUM(CASE WHEN {wk(28, 1)} THEN l.sgn*l.q ELSE 0 END) AS BIGINT) off_4w,
+  CAST(SUM(l.sgn*l.q) AS BIGINT) off_cum
+FROM l GROUP BY 1, 2, 3"""
+
+
+def enabled_purchase(storage_ids, brand_ids) -> str:
+    """SCM-HUB 에서 운영중(OPERATION_ENABLED)인 매입 SKU × 시트 매장 — 시트에 없으면 '미운영' 대상."""
+    return f"""
+SELECT ss.fk_storage_id storage_id, s.sku_id, CAST(p.product_no AS BIGINT) uid, p.product_name, po.option_name
+FROM ocmp.scm_hub.storage_sku ss
+JOIN ocmp.scm_hub.sku s ON s._id = ss.fk_sku_id AND s.purchase_type = 'PURCHASE'
+JOIN ocmp.scm_hub.sku_product_option spo ON spo.fk_sku_id = s._id AND spo.mapping_type = 'ACTIVE'
+JOIN ocmp.scm_hub.product_option po ON po._id = spo.fk_product_option_id
+JOIN ocmp.scm_hub.product p ON p._id = po.fk_product_id AND p.platform = 'MUSINSA'
+WHERE ss.status = 'OPERATION_ENABLED' AND ss.fk_storage_id IN ({Q.int_list(storage_ids)})
+  AND p.product_no IN (SELECT CAST(id AS STRING) FROM musinsa.stock.product WHERE brand_id IN ({Q.str_list(brand_ids)}))"""
+
+
 def build(rows: pd.DataFrame) -> pd.DataFrame:
     df = rows.copy()
     df["flags"] = [[] for _ in range(len(df))]
@@ -221,6 +295,9 @@ def build(rows: pd.DataFrame) -> pd.DataFrame:
     if "storage_status" not in df:
         df["storage_status"] = None
     flag(df["sku_id"].notna() & df["storage_id"].notna() & df["storage_status"].isna(), "SCM 매장 등록 없음")
+    df["severity"] = df["flags"].map(lambda fs: "error" if any(SEVERITY[f] == "error" for f in fs)
+                                     else "warn" if any(SEVERITY[f] == "warn" for f in fs) else "info" if fs else "ok")
+    df["flags_text"] = df["flags"].map(" / ".join)
     # ERP 재고 (매장·허브)
     uids_s = [str(int(u)) for u in uids]
     lg = sorted({str(x) for x in df["lgort"].dropna() if str(x)})
@@ -239,27 +316,99 @@ def build(rows: pd.DataFrame) -> pd.DataFrame:
             hs = hs.assign(size=hs["size"].astype(str), uid_k=hs["uid"].astype("int64").astype("float"))
             df = df.assign(_u=df["uid_k"].astype("float")).merge(hs.drop(columns=["uid"]).rename(columns={"uid_k": "_u"}),
                                                                  on=["_u", "size"], how="left").drop(columns=["_u"])
-    for c in ("erp_avail_qty", "erp_stock_qty", "erp_transfer_qty", "erp_reserved_qty", "hub1000_qty", "hub1700_qty"):
+    if uids_s and lg:
+        progress.step("매입: ERP 허브→매장 이동")
+        mv = dbx.run_df(erp_moves(uids_s, lg))
+        if len(mv):
+            mv = mv.assign(_k=mv["lgort"].astype(str) + "|" + mv["uid"].astype("int64").astype(str) + "|" + mv["size"].astype(str))
+            df["_k"] = df["lgort"].astype(str) + "|" + df["uid_k"].astype("float").astype("Int64").astype(str) + "|" + df["size"]
+            df = df.merge(mv[["_k", "req_in_qty", "moving_in_qty"]], on="_k", how="left").drop(columns=["_k"])
+        progress.step("매입: 매장 판매")
+        sl = dbx.run_df(purchase_sales(uids_s))
+        if len(sl):
+            sl = sl.assign(_k=sl["shop_no"].astype(str) + "|" + sl["uid"].astype("int64").astype(str) + "|" + sl["size"].astype(str))
+            df["_k"] = pd.to_numeric(df["shop_no"], errors="coerce").astype("Int64").astype(str) + "|" \
+                + df["uid_k"].astype("float").astype("Int64").astype(str) + "|" + df["size"]
+            df = df.merge(sl[["_k", "off_w1", "off_4w", "off_cum"]].drop_duplicates("_k"), on="_k", how="left").drop(columns=["_k"])
+    for c in ("erp_avail_qty", "erp_stock_qty", "erp_transfer_qty", "erp_reserved_qty", "hub1000_qty", "hub1700_qty",
+              "req_in_qty", "moving_in_qty", "off_w1", "off_4w", "off_cum"):
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0).astype("int64") if c in df else 0
     df["hub_qty"] = df["hub1000_qty"] + df["hub1700_qty"]
-    # 참고용 보충 필요(1단계 계산 — ERP 이동중·입고 예정은 다음 단계에서 정교화): 적정 − (가용 + ERP 이동중)
+    # 위탁과 같은 정의(2026-10-21): 이동 입고 예정 = 편집샵 보충 요청 + 보충 확정 후 이동중,
+    # 예상 재고 = 매장 현재고 + 이동 입고 예정 − 매장 반납/반출 예정(매입은 아직 0 — ERP 매장→허브 반품 진행분 미연결)
+    df["incoming_qty"] = df["req_in_qty"] + df["moving_in_qty"]
+    df["outgoing_qty"] = 0
+    df["expected_qty"] = df["erp_stock_qty"] + df["incoming_qty"] - df["outgoing_qty"]
     fq = pd.to_numeric(df["fixed_qty"], errors="coerce").fillna(0)
-    have = df["erp_avail_qty"] + df["erp_transfer_qty"]
-    ok = df["sku_id"].notna() & df["storage_id"].notna()
+    ok = df["sku_id"].notna() & df["storage_id"].notna() & (df["severity"].ne("error") if "severity" in df else True)
+    have = df["expected_qty"].clip(lower=0)
     df["need_qty"] = (fq - have).clip(lower=0).where(ok, 0).astype("int64")
     df["over_qty"] = (have - fq).clip(lower=0).where(ok, 0).astype("int64")
-    df["severity"] = df["flags"].map(lambda fs: "error" if any(SEVERITY[f] == "error" for f in fs)
-                                     else "warn" if any(SEVERITY[f] == "warn" for f in fs) else "info" if fs else "ok")
-    df["flags_text"] = df["flags"].map(" / ".join)
+    df["ret_qty"] = pd.concat([df["erp_avail_qty"].clip(lower=0), df["over_qty"]], axis=1).min(axis=1).astype("int64")
     df["offline_yn"] = df["offline_sale_enabled"].map(lambda v: "Y" if str(v).lower() in ("true", "1") else ("N" if str(v).lower() in ("false", "0") else ""))
     df["product_name"] = df["product_name"].fillna(df["product_name_in"])
     keep = ["brand_in", "store_name", "storage_no", "storage_id", "shop_no", "store_in", "lgort", "store_match",
             "uid", "product_name", "category", "size", "option_name", "sku_id", "fixed_qty", "purchase_type",
             "sales_status", "offline_yn", "storage_status",
-            "erp_stock_qty", "erp_avail_qty", "erp_transfer_qty", "erp_reserved_qty", "hub1000_qty", "hub1700_qty", "hub_qty",
-            "need_qty", "over_qty", "erp_store_at", "hub_dt",
+            "erp_stock_qty", "erp_avail_qty", "erp_transfer_qty", "erp_reserved_qty", "req_in_qty", "moving_in_qty",
+            "incoming_qty", "outgoing_qty", "expected_qty", "hub1000_qty", "hub1700_qty", "hub_qty",
+            "off_w1", "off_4w", "off_cum", "need_qty", "over_qty", "ret_qty", "alloc_qty", "fk_sku_id", "erp_store_at", "hub_dt",
             "uid_sizes", "severity", "flags_text", "src_row"]
     return df[[c for c in keep if c in df]].reset_index(drop=True)
+
+
+def allocate(df: pd.DataFrame) -> pd.DataFrame:
+    """허브(1000+1700) 재고를 보충 필요에 배분 — 위탁 MFS 배분과 같은 순서(매장 판매 7일 → 4주 → 누적 → 보충 필요).
+    매입은 오프라인 판매 여부와 무관하게(ERP 출고) 배분하고, 오류·중복 행은 제외."""
+    df = df.copy()
+    df["alloc_qty"] = 0
+    if df.empty:
+        return df
+    left = df.drop_duplicates("sku_id").set_index("sku_id")["hub_qty"].to_dict()
+    cand = df[(df["need_qty"] > 0) & (df["severity"] != "error") & ~df["flags_text"].str.contains("중복", regex=False)]
+    for i, r in cand.sort_values(["off_w1", "off_4w", "off_cum", "need_qty"], ascending=False).iterrows():
+        a = int(min(r["need_qty"], max(left.get(r["sku_id"], 0), 0)))
+        df.at[i, "alloc_qty"] = a
+        left[r["sku_id"]] = left.get(r["sku_id"], 0) - a
+    return df
+
+
+def uploads(df: pd.DataFrame, brand_ids: list[str]) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """SCM-HUB 업로드 파일(위탁과 같은 양식) — ① 운영상태 ② 재고 보충.
+    ① 시트 'Y' 인데 SCM 운영중 아님 → 운영중 / SCM 운영중인데 시트에 없음(같은 브랜드 매입 SKU, 시트 매장) → 미운영
+    ② 이동수량 = 허브 배분(alloc), 과재고 반출 수량 = min(가용, 예상 재고 − 적정). 바코드 = SCM-HUB 대표 바코드."""
+    import engine
+    ok = df[(df["severity"] != "error") & ~df["flags_text"].str.contains("중복", regex=False)]
+    on = ok[ok["storage_status"].fillna("") != "OPERATION_ENABLED"].assign(
+        target_status="운영중", reason=lambda x: x["storage_status"].fillna("").replace("", "등록 없음").map(lambda v: f"시트 Y · SCM {v}"))
+    sids = df["storage_id"].dropna().astype("int64").unique()
+    off = pd.DataFrame()
+    if len(sids) and brand_ids:
+        progress.step("매입: SCM 운영중 매장×SKU")
+        en = dbx.run_df(enabled_purchase(sids, brand_ids))
+        keys = set(zip(ok["storage_id"].astype("int64"), ok["sku_id"]))
+        off = en[[(int(a), b) not in keys for a, b in zip(en["storage_id"], en["sku_id"])]].assign(
+            target_status="미운영", reason="시트에 없음 · SCM 운영중", storage_status="OPERATION_ENABLED") if len(en) else pd.DataFrame()
+        st = df.dropna(subset=["storage_id"]).assign(storage_id=lambda x: x["storage_id"].astype("int64"))             .drop_duplicates("storage_id").set_index("storage_id")
+        if off.empty or "storage_id" not in off:
+            off = pd.DataFrame()
+        else:
+            off = off.assign(store_name=off["storage_id"].astype("int64").map(st["store_name"]),
+                             storage_no=off["storage_id"].astype("int64").map(st["storage_no"]), size=off["option_name"])
+    cols = ["storage_no", "store_name", "sku_id", "uid", "product_name", "size", "target_status", "reason", "storage_status", "erp_stock_qty"]
+    ops = pd.concat([on.reindex(columns=cols), off.reindex(columns=cols)], ignore_index=True)
+    # ② 재고 보충
+    bc = {}
+    fks = df["fk_sku_id"].dropna().astype("int64").unique()
+    if len(fks):
+        sm = dbx.run_df(Q.sku_master(df["sku_id"].dropna().unique()))
+        bc = dict(zip(sm["sku_id"], sm["rep_barcode"]))
+    mv = df[(df["alloc_qty"] > 0) | (df["ret_qty"] > 0)].copy()
+    mv["barcode"] = mv["sku_id"].map(bc)
+    mv["move_qty"] = mv["alloc_qty"]
+    mv["_kind"] = (mv["move_qty"] == 0).astype(int)
+    mv = mv.sort_values(["sku_id", "_kind", "off_w1", "off_4w", "off_cum"], ascending=[True, True, False, False, False]).drop(columns="_kind")
+    return ops, mv
 
 
 def run(cache_dir: str) -> dict:
@@ -291,6 +440,18 @@ def rebuild(cache_dir: str, prev: dict) -> dict:
 
 
 def _save(cache_dir: str, out: pd.DataFrame, files: list) -> dict:
+    if len(out):
+        out = allocate(out)
+        brand_ids = sorted({sh.get("brand_id") for sh in PURCHASE_SHEETS if sh.get("brand_id")})
+        ops, mv = uploads(out, brand_ids)
+    else:
+        ops, mv = pd.DataFrame(), pd.DataFrame()
+    for name, x in (("purchase_ops.parquet", ops), ("purchase_moves.parquet", mv)):
+        x = x.copy()
+        for c in x.columns:
+            if x[c].dtype == object:
+                x[c] = x[c].map(lambda v: "" if v is None or (isinstance(v, float) and pd.isna(v)) else str(v))
+        x.to_parquet(os.path.join(cache_dir, name), index=False)
     o = out.copy()
     for c in o.columns:
         if o[c].dtype == object:
@@ -300,6 +461,10 @@ def _save(cache_dir: str, out: pd.DataFrame, files: list) -> dict:
             "skus": int(out["sku_id"].nunique()) if len(out) else 0,
             "stores": int(out["store_name"].nunique()) if len(out) else 0,
             "by_severity": out["severity"].value_counts().to_dict() if len(out) else {},
+            "need_qty": int(out["need_qty"].sum()) if len(out) else 0, "alloc_qty": int(out["alloc_qty"].sum()) if len(out) else 0,
+            "ret_qty": int(out["ret_qty"].sum()) if len(out) else 0, "incoming_qty": int(out["incoming_qty"].sum()) if len(out) else 0,
+            "ops_on": int((ops["target_status"] == "운영중").sum()) if len(ops) else 0,
+            "ops_off": int((ops["target_status"] == "미운영").sum()) if len(ops) else 0,
             "erp_store_at": str(out["erp_store_at"].dropna().max()) if len(out) and "erp_store_at" in out and out["erp_store_at"].notna().any() else "",
             "hub_dt": str(out["hub_dt"].dropna().max()) if len(out) and "hub_dt" in out and out["hub_dt"].notna().any() else ""}
     return {"files": files, "summary": summ}

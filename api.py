@@ -651,8 +651,10 @@ def offline_sync_csv(uids: str = "", mismatch: int = 0, brand: str | None = None
 PUR_CSV = {"brand_in": "브랜드", "store_name": "매장", "storage_no": "스토어코드", "lgort": "ERP 저장위치",
            "uid": "UID", "product_name": "상품명", "category": "대카테", "size": "사이즈", "sku_id": "SKU ID",
            "fixed_qty": "매장 적정 수량", "erp_stock_qty": "매장 현재고(ERP)", "erp_avail_qty": "매장 가용(ERP)",
-           "erp_transfer_qty": "이동중(ERP)", "hub1000_qty": "허브1000", "hub1700_qty": "허브1700",
-           "need_qty": "보충 필요(참고)", "over_qty": "과잉(참고)", "storage_status": "SCM 매장 등록 상태", "offline_yn": "오프라인 판매(SCM)",
+           "erp_transfer_qty": "이동중(ERP)", "req_in_qty": "편집샵 보충 요청", "moving_in_qty": "편집샵 보충 확정 후 이동중",
+           "incoming_qty": "이동 입고 예정", "expected_qty": "예상 재고", "hub1000_qty": "허브1000", "hub1700_qty": "허브1700",
+           "off_w1": "7일 판매", "off_4w": "4주 판매", "off_cum": "누적 판매",
+           "need_qty": "보충 필요", "alloc_qty": "허브 배분", "over_qty": "과잉", "ret_qty": "과재고 반출", "storage_status": "SCM 매장 등록 상태", "offline_yn": "오프라인 판매(SCM)",
            "sales_status": "SCM 판매상태", "uid_sizes": "상품 실제 사이즈", "severity": "검증", "flags_text": "확인 사항",
            "src_row": "원본 행", "store_in": "시트 매장명"}
 
@@ -689,6 +691,45 @@ def purchase_rows(store: str | None = None, q: str | None = None, severity: str 
     flags = (pd.Series([f for t in base["flags_text"] for f in t.split(" / ") if f]).value_counts().to_dict()) if len(base) else {}
     return {"rows": records(df), "total": len(df), "meta": meta.get("purchase", {}), "by_store": by_store,
             "stores": sorted(base["store_name"].dropna().unique().tolist()) if len(base) else [], "flags": flags}
+
+
+@app.get("/api/purchase/ops")
+def purchase_ops(store: str | None = None, u: str = Depends(user)):
+    df = _extra("purchase_ops.parquet")
+    if len(df) and store:
+        df = df[df["store_name"].isin(store.split("|"))]
+    cnt = df["target_status"].value_counts().to_dict() if len(df) else {}
+    return {"rows": records(df), "total": len(df), "counts": cnt}
+
+
+@app.get("/api/purchase/ops.csv")
+def purchase_ops_csv(store: str | None = None, u: str = Depends(user)):
+    """매입 — SCM-HUB 스토어 운영상태 업로드 양식(위탁과 동일): 스토어코드 / SKU번호 / 스토어 운영상태"""
+    df = _extra("purchase_ops.parquet")
+    if len(df) and store:
+        df = df[df["store_name"].isin(store.split("|"))]
+    out = pd.DataFrame({"스토어코드": df.get("storage_no"), "SKU번호": df.get("sku_id"), "스토어 운영상태": df.get("target_status")})
+    return _csv(out, "purchase_store_operation_status.csv")
+
+
+@app.get("/api/purchase/moves")
+def purchase_moves(store: str | None = None, u: str = Depends(user)):
+    df = _extra("purchase_moves.parquet")
+    if len(df) and store:
+        df = df[df["store_name"].isin(store.split("|"))]
+    tot = {k: int(pd.to_numeric(df[k], errors="coerce").sum()) if len(df) else 0 for k in ("move_qty", "ret_qty")}
+    return {"rows": records(df), "total": len(df), **tot}
+
+
+@app.get("/api/purchase/moves.csv")
+def purchase_moves_csv(store: str | None = None, u: str = Depends(user)):
+    """매입 — SCM-HUB 재고 보충 등록 양식(위탁과 동일): 스토어코드 / SKU 번호 / 바코드 / 이동수량 / 과재고 반출 수량"""
+    df = _extra("purchase_moves.parquet")
+    if len(df) and store:
+        df = df[df["store_name"].isin(store.split("|"))]
+    out = pd.DataFrame({"스토어코드": df.get("storage_no"), "SKU 번호": df.get("sku_id"), "바코드": df.get("barcode"),
+                        "이동수량": df.get("move_qty"), "과재고 반출 수량": df.get("ret_qty")})
+    return _csv(out, "purchase_store_replenishment.csv")
 
 
 @app.get("/api/purchase.csv")
