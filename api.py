@@ -647,6 +647,53 @@ def offline_sync_csv(uids: str = "", mismatch: int = 0, brand: str | None = None
     return _csv(df[[c for c in SYNC_CSV if c in df]].rename(columns=SYNC_CSV), "offline_sale_sync.csv")
 
 
+# ── 매입(무신사 스탠다드 등) 운영 시트 전개 — 1단계 (purchase.py) ─────────────────
+PUR_CSV = {"brand_in": "브랜드", "store_name": "매장", "storage_no": "스토어코드", "lgort": "ERP 저장위치",
+           "uid": "UID", "product_name": "상품명", "category": "대카테", "size": "사이즈", "sku_id": "SKU ID",
+           "fixed_qty": "매장 적정 수량", "storage_status": "SCM 매장 등록 상태", "offline_yn": "오프라인 판매(SCM)",
+           "sales_status": "SCM 판매상태", "uid_sizes": "상품 실제 사이즈", "severity": "검증", "flags_text": "확인 사항",
+           "src_row": "원본 행", "store_in": "시트 매장명"}
+
+
+def _purchase(store: str | None, q: str | None, severity: str | None, flag: str | None) -> pd.DataFrame:
+    df = _extra("purchase_rows.parquet")
+    if df.empty:
+        return df
+    if store:
+        df = df[df["store_name"].isin(store.split("|"))]
+    if severity:
+        df = df[df["severity"].isin(severity.split("|"))]
+    if flag:
+        df = df[df["flags_text"].str.contains(flag, regex=False)]
+    if q:
+        k = q.strip().upper()
+        df = df[df["sku_id"].str.upper().str.contains(k, regex=False) | df["uid"].astype(str).str.contains(k, regex=False)
+                | df["product_name"].str.upper().str.contains(k, regex=False)]
+    return df
+
+
+@app.get("/api/purchase")
+def purchase_rows(store: str | None = None, q: str | None = None, severity: str | None = None, flag: str | None = None,
+                  u: str = Depends(user)):
+    _, meta = snap()
+    df = _purchase(store, q, severity, flag)
+    base = _extra("purchase_rows.parquet")
+    by_store = (base.groupby("store_name").agg(skus=("sku_id", lambda s: s[s != ""].nunique()), uids=("uid", "nunique"),
+                                               pcs=("fixed_qty", lambda s: float(pd.to_numeric(s, errors="coerce").sum())),
+                                               errors=("severity", lambda s: int((s == "error").sum())))
+                .reset_index().to_dict("records")) if len(base) else []
+    flags = (pd.Series([f for t in base["flags_text"] for f in t.split(" / ") if f]).value_counts().to_dict()) if len(base) else {}
+    return {"rows": records(df), "total": len(df), "meta": meta.get("purchase", {}), "by_store": by_store,
+            "stores": sorted(base["store_name"].dropna().unique().tolist()) if len(base) else [], "flags": flags}
+
+
+@app.get("/api/purchase.csv")
+def purchase_csv(store: str | None = None, q: str | None = None, severity: str | None = None, flag: str | None = None,
+                 u: str = Depends(user)):
+    df = _purchase(store, q, severity, flag)
+    return _csv(df[[c for c in PUR_CSV if c in df]].rename(columns=PUR_CSV), "purchase_store_sku.csv")
+
+
 @app.get("/api/moves")
 def moves(ret: str = "all", brand: str | None = None, store: str | None = None, md: str | None = None,
           u: str = Depends(user)):

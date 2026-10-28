@@ -18,6 +18,7 @@ import dbx
 import engine
 import progress
 import queries as Q
+import purchase
 import sheets
 import source
 
@@ -76,9 +77,16 @@ def run(kind: str = "full") -> dict:
                               "detail": "테스트 모드 — 브랜드 시트를 읽지 않음(서비스 계정 공유 필요)" if test_mode
                               else "브랜드 공유 시트가 폴더에 없음", "rows": 0})
         rows.to_pickle(rows_p)
+        # 매입 시트(무신사 스탠다드 등) — 위탁과 따로 전개. 실패해도 위탁 새로고침은 계속
+        try:
+            purchase_meta = purchase.run(CACHE_DIR)
+        except Exception as e:  # noqa: BLE001
+            purchase_meta = {"files": [], "summary": {}, "error": str(e)[:300]}
+        purchase_meta["at"] = _now()
     else:
         rows = pd.read_pickle(rows_p)
         files = prev.get("files", [])
+        purchase_meta = prev.get("purchase", {})
     md_by_brand = tb.dropna(subset=["brand_nm"]).groupby("brand_nm").agg(
         offline_md=("offline_md_id", lambda s: ", ".join(sorted({x for x in s if isinstance(x, str) and x})) or "미지정"),
         target_reason=("target_reason", "first")).to_dict("index")
@@ -92,13 +100,13 @@ def run(kind: str = "full") -> dict:
         if kind == "full" or kind == k or (k == "sheets" and read_sheets):
             stamps[v] = now
     stamps["stock_at"] = now
-    meta = _finish(out, summary, files, tb, t0, src, stamps, kind)
+    meta = _finish(out, summary, files, tb, t0, src, stamps, kind, purchase_meta)
     src.save()
     return meta
 
 
 def _finish(out: pd.DataFrame, summary: dict, files: list, tb: pd.DataFrame, t0: float, src, stamps: dict,
-            kind: str) -> dict:
+            kind: str, purchase_meta: dict | None = None) -> dict:
     """업로드 파일(ops/case2/stock_bc) 재계산 + 스냅샷·meta 저장. 전체 새로고침과 SCM 빠른 새로고침이 같이 쓴다."""
     # 업로드 파일용: 운영상태 변경 대상 + 반출 바코드별 재고 (시트를 정상으로 읽은 브랜드만)
     progress.step("업로드 파일·스냅샷 저장")
@@ -141,7 +149,7 @@ def _finish(out: pd.DataFrame, summary: dict, files: list, tb: pd.DataFrame, t0:
     now = _now()
     timings = progress.done()
     meta = {
-        "refreshed_at": now, "kind": kind, **stamps,
+        "refreshed_at": now, "kind": kind, **stamps, "purchase": purchase_meta or {},
         "scm_refreshed_at": stamps.get("scm_at", now), "timings": timings,
         "elapsed_sec": round(time.time() - t0, 1),
         "stock_date": str(stock_date[stock_date != ""].max()) if stock_date is not None and (stock_date != "").any() else "",
