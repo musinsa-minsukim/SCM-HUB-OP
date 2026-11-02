@@ -26,8 +26,11 @@ import queries as Q
 # 매입 시트 목록 — (브랜드 표시명, 파일 id, 탭 이름). 늘어나면 여기(또는 env PURCHASE_SHEETS JSON)에 추가.
 PURCHASE_SHEETS = json.loads(os.environ.get("PURCHASE_SHEETS", "null") or "null") or [
     {"brand": "무신사 스탠다드", "brand_ids": ["musinsastandard", "musinsastandardwoman"],
+     "off_brand_ids": ["musinsastandardkids"],   # 사용자 2026-11-02: 키즈는 미운영 — 시트에 Y 가 있어도 운영으로 보지 않는다
      "file_id": "15mZKH9Vh4SLsl2Jb3m3TTrENEckGt9maeE5chJr2sus", "tab": "2. 매장별 SKU산정"},
 ]
+OFF_BRANDS = {b for sh in PURCHASE_SHEETS for b in sh.get("off_brand_ids", [])}
+SOCK_RE = re.compile(r"양말|삭스|덧신", re.I)   # 양말 카테고리(비제스트 small_nm) — 시트 추가 전 구분용
 SIZE_RE = re.compile(r"^(FREE|F|ONE ?SIZE|OS|XXS|XS|S|M|L|XL|XXL|XXXL|2XL|3XL|\d{2,3}(\.\d)?)$", re.I)
 
 SEVERITY = {"매장 확인 불가": "error", "SKU 없음(사이즈 옵션 없음)": "error", "상품 없음(UID)": "error",
@@ -316,11 +319,22 @@ def unlisted(df: pd.DataFrame, files: list, brand_ids: list[str]) -> pd.DataFram
     x["rt_stores"] = [", ".join(sorted(run_sizes.get((a, b), []))) for a, b in zip(x["uid"], x["size"])]
     mp = _store_map(pd.DataFrame(stores)[["lgort", "store_in"]].drop_duplicates().assign(lgort=lambda d: d["lgort"].astype(str)))
     x = x.merge(mp[["lgort", "store_name", "storage_no", "shop_no"]], on="lgort", how="left")
+    # 메가스토어는 이 목록에서 뺀다(사용자 2026-11-02)
+    x = x[~x["store_name"].fillna("").str.contains("메가스토어", regex=False)].copy()
+    if x.empty:
+        return x
     uids = x["uid"].unique()
     # 상품·브랜드·SKU·허브·판매
     ga = dbx.run_df(Q.goods_attr([str(int(i)) for i in uids]))
     ga = ga.assign(uid=pd.to_numeric(ga["goods_no"], errors="coerce").astype("int64"))
     x = x.merge(ga[["uid", "brand_nm", "brand", "small_nm"]], on="uid", how="left")
+    x["cat_group"] = ["양말" if SOCK_RE.search(str(c or "")) else "양말 외" for c in x["small_nm"]]
+    # 미운영 브랜드(키즈)는 매장의 시트 작성 여부와 상관없이 미운영으로 확정
+    off = x["brand"].isin(OFF_BRANDS)
+    x.loc[off, "store_scope"] = "시트 운영 매장"
+    x.loc[off, "reason"] = "미운영 브랜드"
+    x.loc[off, "action"] = "반납"
+    x.loc[off, "rt_stores"] = ""
     sk = dbx.run_df(sku_by_uid_size(uids))
     sk = sk.assign(uid=sk["uid"].astype("int64"), size=sk["size"].astype(str))
     pn = sk.drop_duplicates("uid").set_index("uid")["product_name"]
@@ -453,6 +467,8 @@ def build(rows: pd.DataFrame) -> pd.DataFrame:
             "incoming_qty", "outgoing_qty", "expected_qty", "hub1000_qty", "hub1700_qty", "hub_qty",
             "off_w1", "off_4w", "off_cum", "need_qty", "over_qty", "ret_qty", "alloc_qty", "fk_sku_id", "erp_store_at", "hub_dt",
             "uid_sizes", "severity", "flags_text", "src_row"]
+    if "brand" in df:
+        df = df[~df["brand"].isin(OFF_BRANDS)]
     return df[[c for c in keep if c in df]].reset_index(drop=True)
 
 
@@ -541,7 +557,7 @@ def rebuild(cache_dir: str, prev: dict) -> dict:
 def _save(cache_dir: str, out: pd.DataFrame, files: list) -> dict:
     if len(out):
         out = allocate(out)
-        brand_ids = sorted({b for sh in PURCHASE_SHEETS for b in sh.get("brand_ids", [])})
+        brand_ids = sorted({b for sh in PURCHASE_SHEETS for b in sh.get("brand_ids", [])} | OFF_BRANDS)
         ops, mv = uploads(out, brand_ids)
         un = unlisted(out, files, brand_ids)
     else:

@@ -56,7 +56,9 @@ const unCols: ColDef[] = [
   colText("sku_id", "SKU ID", { minWidth: 140 }),
   colText("uid", "UID", { minWidth: 90 }),
   colText("product_name", "상품명", { minWidth: 220 }),
-  colText("small_nm", "카테고리", { minWidth: 100 }),
+  { ...colText("cat_group", "양말 구분", { minWidth: 80, headerTooltip: "비제스트 카테고리에 양말·삭스·덧신이 들어가면 양말" }),
+    cellStyle: ((p: any) => (p.value === "양말" ? { fontWeight: 700 } : null)) as any },
+  colText("small_nm", "카테고리", { minWidth: 110 }),
   colText("size", "사이즈", { minWidth: 70 }),
   { ...colNum("erp_stock_qty", "매장 현재고(ERP)", "int"), cellStyle: { fontWeight: 700, textAlign: "right" } } as ColDef,
   colNum("erp_avail_qty", "매장 가용(ERP)", "int"),
@@ -119,7 +121,8 @@ export default function Purchase({ dark }: PageProps) {
   const [act, setAct] = useState("");
   const params = { store, severity: sev, flag, q, brand };
   const [scope, setScope] = useState("시트 운영 매장");
-  const unQ = { brand, store, action: act, scope };
+  const [cat, setCat] = useState("");
+  const unQ = { brand, store, action: act, scope, cat };
   const un = useApi<any>("/purchase/unlisted" + qs(unQ));
   const { data, err, loading } = useApi<any>("/purchase" + qs(params));
   const ops = useApi<any>("/purchase/ops" + qs({ store }));
@@ -182,12 +185,15 @@ export default function Purchase({ dark }: PageProps) {
       <Card>
         <CardBody>
           <SectionTitle title={`미운영 매장 재고 ${num(un.data?.qty ?? 0)}개 — RT 가능 ${num(un.data?.qty_rt ?? 0)} · 반납 ${num(un.data?.qty_ret ?? 0)}`}
-            sub="시트에서 그 매장×UID×사이즈를 운영하지 않는데 ERP 매장 재고가 있는 상품입니다(무신사 스탠다드·우먼). 기본은 시트에 'Y' 가 하나라도 있는 매장만 판정합니다 — Y 가 없는 매장은 시트 미작성이라 칩으로 따로 봅니다. 브랜드·매장 칩이 같이 걸립니다. 그 UID×사이즈를 운영하는 다른 매장이 있으면 RT 가능, 없으면 반납. ② 재고 보충 파일에는 자동으로 넣지 않습니다 — 반납은 아래 '반출 업로드 파일'(같은 양식)로 내려받으세요."
+            sub="시트에서 그 매장×UID×사이즈를 운영하지 않는데 ERP 매장 재고가 있는 상품입니다(무신사 스탠다드·우먼·키즈, 메가스토어 제외). 기본은 시트에 'Y' 가 하나라도 있는 매장만 판정합니다 — Y 가 없는 매장은 시트 미작성이라 칩으로 따로 봅니다. 키즈는 미운영 브랜드라 매장과 상관없이 반납으로 잡습니다. 브랜드·매장 칩이 같이 걸립니다. 그 UID×사이즈를 운영하는 다른 매장이 있으면 RT 가능, 없으면 반납. ② 재고 보충 파일에는 자동으로 넣지 않습니다 — 반납은 아래 '반출 업로드 파일'(같은 양식)로 내려받으세요."
             right={<div className="flex items-center gap-2">{un.loading && <Spinner />}
               {[["시트 운영 매장", `시트 운영 매장 ${num(un.data?.scopes?.["시트 운영 매장"] ?? 0)}`], ["시트 미작성 매장", `시트 미작성 매장 ${num(un.data?.scopes?.["시트 미작성 매장"] ?? 0)}`]].map(([v, l]) =>
                 <Chip key={v} active={scope === v} onClick={() => setScope(v)}>{l}</Chip>)}
               <span className="mx-1 text-slate-300">|</span>
               {[["", "전체"], ["RT 가능", "RT 가능"], ["반납", "반납"]].map(([v, l]) => <Chip key={v} active={act === v} onClick={() => setAct(v)}>{l}</Chip>)}
+              <span className="mx-1 text-slate-300">|</span>
+              {[["", "양말 포함"], ["양말", `양말 ${num(un.data?.cats?.["양말"] ?? 0)}`], ["양말 외", `양말 외 ${num(un.data?.cats?.["양말 외"] ?? 0)}`]].map(([v, l]) =>
+                <Chip key={"c" + v} active={cat === v} onClick={() => setCat(v)}>{l}</Chip>)}
               <a href={"/api/purchase/unlisted.csv" + qs(unQ)} className="text-xs text-slate-500 underline">상세 CSV</a>
               <Dl href={"/api/purchase/unlisted.csv" + qs({ ...unQ, upload: "1" })} label="반출 업로드 파일" /></div>} />
           <div className="mb-3 flex flex-wrap gap-3 text-xs text-slate-500">

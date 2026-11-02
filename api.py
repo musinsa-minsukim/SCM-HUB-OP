@@ -735,10 +735,13 @@ def purchase_moves_csv(store: str | None = None, u: str = Depends(user)):
     return _csv(out, "purchase_store_replenishment.csv")
 
 
-def _unlisted(brand: str | None, store: str | None, action: str | None, scope: str | None = "시트 운영 매장") -> pd.DataFrame:
+def _unlisted(brand: str | None, store: str | None, action: str | None, scope: str | None = "시트 운영 매장",
+              cat: str | None = None) -> pd.DataFrame:
     df = _extra("purchase_unlisted.parquet")
     if df.empty:
         return df
+    if cat:
+        df = df[df["cat_group"] == cat]
     if scope:
         df = df[df["store_scope"] == scope]
     if brand:
@@ -752,22 +755,23 @@ def _unlisted(brand: str | None, store: str | None, action: str | None, scope: s
 
 @app.get("/api/purchase/unlisted")
 def purchase_unlisted(brand: str | None = None, store: str | None = None, action: str | None = None,
-                      scope: str = "시트 운영 매장", u: str = Depends(user)):
+                      scope: str = "시트 운영 매장", cat: str | None = None, u: str = Depends(user)):
     """미운영 매장 재고 — 시트에서 그 매장×UID×사이즈를 운영하지 않는데 ERP 매장 재고가 있는 것."""
-    df = _unlisted(brand, store, action, scope)
+    df = _unlisted(brand, store, action, scope, cat)
     base = _unlisted(None, None, None, scope)
     q = lambda d: int(pd.to_numeric(d["erp_stock_qty"], errors="coerce").sum()) if len(d) else 0
     by_brand = [{"brand_nm": b, "qty": q(g), "skus": int(g["uid"].nunique())} for b, g in base.groupby("brand_nm")] if len(base) else []
     all_ = _extra("purchase_unlisted.parquet")
     scopes = {k: q(g) for k, g in all_.groupby("store_scope")} if len(all_) else {}
-    return {"rows": records(df), "total": len(df), "qty": q(df), "by_brand": by_brand, "scopes": scopes,
+    cats = {k: q(g) for k, g in base.groupby("cat_group")} if len(base) else {}
+    return {"rows": records(df), "total": len(df), "qty": q(df), "by_brand": by_brand, "scopes": scopes, "cats": cats,
             "qty_rt": q(df[df["action"] == "RT 가능"]) if len(df) else 0, "qty_ret": q(df[df["action"] == "반납"]) if len(df) else 0}
 
 
 @app.get("/api/purchase/unlisted.csv")
 def purchase_unlisted_csv(brand: str | None = None, store: str | None = None, action: str | None = None, upload: int = 0,
-                          scope: str = "시트 운영 매장", u: str = Depends(user)):
-    df = _unlisted(brand, store, action, scope)
+                          scope: str = "시트 운영 매장", cat: str | None = None, u: str = Depends(user)):
+    df = _unlisted(brand, store, action, scope, cat)
     if upload:   # 재고 보충 등록 양식 그대로 — 이동수량 0, 과재고 반출 수량 = 매장 가용
         # SKU ID 가 없는 행(옵션 연결 안 된 재고)은 양식에 못 넣는다 — 상세 CSV 로 확인
         d = df[(pd.to_numeric(df["erp_avail_qty"], errors="coerce").fillna(0) > 0) & (df["sku_id"].fillna("") != "")] if len(df) else df
@@ -775,7 +779,7 @@ def purchase_unlisted_csv(brand: str | None = None, store: str | None = None, ac
                             "이동수량": 0, "과재고 반출 수량": d.get("erp_avail_qty")})
         return _csv(out, "purchase_unlisted_return.csv")
     cols = {"brand_nm": "브랜드", "store_name": "매장", "storage_no": "스토어코드", "sku_id": "SKU ID", "uid": "UID", "product_name": "상품명",
-            "small_nm": "카테고리", "size": "사이즈", "barcode": "바코드", "erp_stock_qty": "매장 현재고(ERP)", "erp_avail_qty": "매장 가용(ERP)", "hub_qty": "허브 재고",
+            "cat_group": "양말 구분", "small_nm": "카테고리", "size": "사이즈", "barcode": "바코드", "erp_stock_qty": "매장 현재고(ERP)", "erp_avail_qty": "매장 가용(ERP)", "hub_qty": "허브 재고",
             "off_w1": "7일 판매", "off_cum": "누적 판매", "action": "처리", "reason": "사유", "rt_stores": "운영 매장", "store_scope": "매장 구분"}
     return _csv(df[[c for c in cols if c in df]].rename(columns=cols), "purchase_unlisted_stock.csv")
 
