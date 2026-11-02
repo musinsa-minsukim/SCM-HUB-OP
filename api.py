@@ -648,7 +648,7 @@ def offline_sync_csv(uids: str = "", mismatch: int = 0, brand: str | None = None
 
 
 # ── 매입(무신사 스탠다드 등) 운영 시트 전개 — 1단계 (purchase.py) ─────────────────
-PUR_CSV = {"brand_in": "브랜드", "store_name": "매장", "storage_no": "스토어코드", "lgort": "ERP 저장위치",
+PUR_CSV = {"brand_nm": "브랜드", "store_name": "매장", "storage_no": "스토어코드", "lgort": "ERP 저장위치",
            "uid": "UID", "product_name": "상품명", "category": "대카테", "size": "사이즈", "sku_id": "SKU ID",
            "fixed_qty": "매장 적정 수량", "erp_stock_qty": "매장 현재고(ERP)", "erp_avail_qty": "매장 가용(ERP)",
            "erp_transfer_qty": "이동중(ERP)", "req_in_qty": "편집샵 보충 요청", "moving_in_qty": "편집샵 보충 확정 후 이동중",
@@ -659,10 +659,12 @@ PUR_CSV = {"brand_in": "브랜드", "store_name": "매장", "storage_no": "스�
            "src_row": "원본 행", "store_in": "시트 매장명"}
 
 
-def _purchase(store: str | None, q: str | None, severity: str | None, flag: str | None) -> pd.DataFrame:
+def _purchase(store: str | None, q: str | None, severity: str | None, flag: str | None, brand: str | None = None) -> pd.DataFrame:
     df = _extra("purchase_rows.parquet")
     if df.empty:
         return df
+    if brand:
+        df = df[df["brand_nm"].isin(brand.split("|"))]
     if store:
         df = df[df["store_name"].isin(store.split("|"))]
     if severity:
@@ -678,9 +680,9 @@ def _purchase(store: str | None, q: str | None, severity: str | None, flag: str 
 
 @app.get("/api/purchase")
 def purchase_rows(store: str | None = None, q: str | None = None, severity: str | None = None, flag: str | None = None,
-                  u: str = Depends(user)):
+                  brand: str | None = None, u: str = Depends(user)):
     _, meta = snap()
-    df = _purchase(store, q, severity, flag)
+    df = _purchase(store, q, severity, flag, brand)
     base = _extra("purchase_rows.parquet")
     by_store = (base.groupby("store_name").agg(skus=("sku_id", lambda s: s[s != ""].nunique()), uids=("uid", "nunique"),
                                                pcs=("fixed_qty", lambda s: float(pd.to_numeric(s, errors="coerce").sum())),
@@ -689,7 +691,8 @@ def purchase_rows(store: str | None = None, q: str | None = None, severity: str 
                                                need=("need_qty", lambda s: float(pd.to_numeric(s, errors="coerce").sum())) if "need_qty" in base else ("severity", lambda s: 0))
                 .reset_index().to_dict("records")) if len(base) else []
     flags = (pd.Series([f for t in base["flags_text"] for f in t.split(" / ") if f]).value_counts().to_dict()) if len(base) else {}
-    return {"rows": records(df), "total": len(df), "meta": meta.get("purchase", {}), "by_store": by_store,
+    brands = sorted(x for x in base["brand_nm"].dropna().unique() if x) if len(base) and "brand_nm" in base else []
+    return {"rows": records(df), "total": len(df), "meta": meta.get("purchase", {}), "by_store": by_store, "brands": brands,
             "stores": sorted(base["store_name"].dropna().unique().tolist()) if len(base) else [], "flags": flags}
 
 
@@ -732,10 +735,55 @@ def purchase_moves_csv(store: str | None = None, u: str = Depends(user)):
     return _csv(out, "purchase_store_replenishment.csv")
 
 
+def _unlisted(brand: str | None, store: str | None, action: str | None, scope: str | None = "시트 운영 매장") -> pd.DataFrame:
+    df = _extra("purchase_unlisted.parquet")
+    if df.empty:
+        return df
+    if scope:
+        df = df[df["store_scope"] == scope]
+    if brand:
+        df = df[df["brand_nm"].isin(brand.split("|"))]
+    if store:
+        df = df[df["store_name"].isin(store.split("|"))]
+    if action:
+        df = df[df["action"] == action]
+    return df
+
+
+@app.get("/api/purchase/unlisted")
+def purchase_unlisted(brand: str | None = None, store: str | None = None, action: str | None = None,
+                      scope: str = "시트 운영 매장", u: str = Depends(user)):
+    """미운영 매장 재고 — 시트에서 그 매장×UID×사이즈를 운영하지 않는데 ERP 매장 재고가 있는 것."""
+    df = _unlisted(brand, store, action, scope)
+    base = _unlisted(None, None, None, scope)
+    q = lambda d: int(pd.to_numeric(d["erp_stock_qty"], errors="coerce").sum()) if len(d) else 0
+    by_brand = [{"brand_nm": b, "qty": q(g), "skus": int(g["uid"].nunique())} for b, g in base.groupby("brand_nm")] if len(base) else []
+    all_ = _extra("purchase_unlisted.parquet")
+    scopes = {k: q(g) for k, g in all_.groupby("store_scope")} if len(all_) else {}
+    return {"rows": records(df), "total": len(df), "qty": q(df), "by_brand": by_brand, "scopes": scopes,
+            "qty_rt": q(df[df["action"] == "RT 가능"]) if len(df) else 0, "qty_ret": q(df[df["action"] == "반납"]) if len(df) else 0}
+
+
+@app.get("/api/purchase/unlisted.csv")
+def purchase_unlisted_csv(brand: str | None = None, store: str | None = None, action: str | None = None, upload: int = 0,
+                          scope: str = "시트 운영 매장", u: str = Depends(user)):
+    df = _unlisted(brand, store, action, scope)
+    if upload:   # 재고 보충 등록 양식 그대로 — 이동수량 0, 과재고 반출 수량 = 매장 가용
+        # SKU ID 가 없는 행(옵션 연결 안 된 재고)은 양식에 못 넣는다 — 상세 CSV 로 확인
+        d = df[(pd.to_numeric(df["erp_avail_qty"], errors="coerce").fillna(0) > 0) & (df["sku_id"].fillna("") != "")] if len(df) else df
+        out = pd.DataFrame({"스토어코드": d.get("storage_no"), "SKU 번호": d.get("sku_id"), "바코드": d.get("barcode"),
+                            "이동수량": 0, "과재고 반출 수량": d.get("erp_avail_qty")})
+        return _csv(out, "purchase_unlisted_return.csv")
+    cols = {"brand_nm": "브랜드", "store_name": "매장", "storage_no": "스토어코드", "sku_id": "SKU ID", "uid": "UID", "product_name": "상품명",
+            "small_nm": "카테고리", "size": "사이즈", "barcode": "바코드", "erp_stock_qty": "매장 현재고(ERP)", "erp_avail_qty": "매장 가용(ERP)", "hub_qty": "허브 재고",
+            "off_w1": "7일 판매", "off_cum": "누적 판매", "action": "처리", "reason": "사유", "rt_stores": "운영 매장", "store_scope": "매장 구분"}
+    return _csv(df[[c for c in cols if c in df]].rename(columns=cols), "purchase_unlisted_stock.csv")
+
+
 @app.get("/api/purchase.csv")
 def purchase_csv(store: str | None = None, q: str | None = None, severity: str | None = None, flag: str | None = None,
-                 u: str = Depends(user)):
-    df = _purchase(store, q, severity, flag)
+                 brand: str | None = None, u: str = Depends(user)):
+    df = _purchase(store, q, severity, flag, brand)
     return _csv(df[[c for c in PUR_CSV if c in df]].rename(columns=PUR_CSV), "purchase_store_sku.csv")
 
 

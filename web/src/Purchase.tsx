@@ -12,6 +12,7 @@ const sevStyle = ((p: any) => (!p.data || p.data.__muTotal ? null
 
 const cols: ColDef[] = [
   colText("store_name", "매장", { pinned: "left", minWidth: 150 }),
+  colText("brand_nm", "브랜드", { minWidth: 130 }),
   colText("sku_id", "SKU ID", { minWidth: 140 }),
   colText("uid", "UID", { minWidth: 90 }),
   colText("product_name", "상품명", { minWidth: 220 }),
@@ -43,8 +44,29 @@ const cols: ColDef[] = [
   colText("storage_no", "스토어코드", { minWidth: 100 }),
   colText("lgort", "ERP 저장위치", { minWidth: 90 }),
   colText("store_in", "시트 매장명", { minWidth: 150 }),
-  colText("brand_in", "브랜드", { minWidth: 110 }),
+
   colText("src_row", "원본 행", { minWidth: 70 }),
+];
+
+const unCols: ColDef[] = [
+  colText("store_name", "매장", { pinned: "left", minWidth: 150 }),
+  colText("brand_nm", "브랜드", { minWidth: 130 }),
+  { ...colText("action", "처리", { minWidth: 80, headerTooltip: "그 UID×사이즈를 운영하는 다른 매장이 시트에 있으면 RT 가능, 없으면 반납" }),
+    cellStyle: ((p: any) => (p.value === "반납" ? { color: "var(--ratio-down)", fontWeight: 700 } : p.value === "RT 가능" ? { color: "var(--ratio-up)", fontWeight: 700 } : null)) as any },
+  colText("sku_id", "SKU ID", { minWidth: 140 }),
+  colText("uid", "UID", { minWidth: 90 }),
+  colText("product_name", "상품명", { minWidth: 220 }),
+  colText("small_nm", "카테고리", { minWidth: 100 }),
+  colText("size", "사이즈", { minWidth: 70 }),
+  { ...colNum("erp_stock_qty", "매장 현재고(ERP)", "int"), cellStyle: { fontWeight: 700, textAlign: "right" } } as ColDef,
+  colNum("erp_avail_qty", "매장 가용(ERP)", "int"),
+  colNum("hub_qty", "허브 재고", "int"),
+  colNum("off_w1", "7일 판매", "int"),
+  colNum("off_cum", "누적 판매", "int"),
+  colText("reason", "사유", { minWidth: 150 }),
+  colText("rt_stores", "운영 매장", { minWidth: 220 }),
+  colText("barcode", "바코드", { minWidth: 150 }),
+  colText("storage_no", "스토어코드", { minWidth: 100 }),
 ];
 
 const opsCols: ColDef[] = [
@@ -93,7 +115,12 @@ export default function Purchase({ dark }: PageProps) {
   const [flag, setFlag] = useState("");
   const [text, setText] = useState("");
   const [q, setQ] = useState("");
-  const params = { store, severity: sev, flag, q };
+  const [brand, setBrand] = useState("");
+  const [act, setAct] = useState("");
+  const params = { store, severity: sev, flag, q, brand };
+  const [scope, setScope] = useState("시트 운영 매장");
+  const unQ = { brand, store, action: act, scope };
+  const un = useApi<any>("/purchase/unlisted" + qs(unQ));
   const { data, err, loading } = useApi<any>("/purchase" + qs(params));
   const ops = useApi<any>("/purchase/ops" + qs({ store }));
   const mv = useApi<any>("/purchase/moves" + qs({ store }));
@@ -129,6 +156,10 @@ export default function Purchase({ dark }: PageProps) {
           <div className="mb-2 text-xs text-slate-500">
             {files.map((f) => <span key={f.file_id} className="mr-3">{f.brand}: {f.status === "ok" ? `${num(f.rows)}행` : <b className="text-rose-600">{f.status} {f.detail}</b>}</span>)}
           </div>
+          <div className="mb-2 flex flex-wrap items-center gap-1.5">
+            <Chip active={!brand} onClick={() => setBrand("")}>전체 브랜드</Chip>
+            {(data?.brands ?? []).map((b: string) => <Chip key={b} active={brand === b} onClick={() => setBrand(b)}>{b}</Chip>)}
+          </div>
           <div className="mb-3 flex flex-wrap items-center gap-1.5">
             <Chip active={!store} onClick={() => setStore("")}>전체 매장</Chip>
             {(data?.by_store ?? []).map((b: any) =>
@@ -148,6 +179,24 @@ export default function Purchase({ dark }: PageProps) {
           <TotalGrid dark={dark} rows={data?.rows ?? []} columns={cols} height={560} sum={["fixed_qty", "erp_stock_qty", "erp_avail_qty", "incoming_qty", "req_in_qty", "moving_in_qty", "expected_qty", "off_w1", "off_cum", "need_qty", "alloc_qty", "over_qty", "ret_qty"]} />
         </CardBody>
       </Card>
+      <Card>
+        <CardBody>
+          <SectionTitle title={`미운영 매장 재고 ${num(un.data?.qty ?? 0)}개 — RT 가능 ${num(un.data?.qty_rt ?? 0)} · 반납 ${num(un.data?.qty_ret ?? 0)}`}
+            sub="시트에서 그 매장×UID×사이즈를 운영하지 않는데 ERP 매장 재고가 있는 상품입니다(무신사 스탠다드·우먼). 기본은 시트에 'Y' 가 하나라도 있는 매장만 판정합니다 — Y 가 없는 매장은 시트 미작성이라 칩으로 따로 봅니다. 브랜드·매장 칩이 같이 걸립니다. 그 UID×사이즈를 운영하는 다른 매장이 있으면 RT 가능, 없으면 반납. ② 재고 보충 파일에는 자동으로 넣지 않습니다 — 반납은 아래 '반출 업로드 파일'(같은 양식)로 내려받으세요."
+            right={<div className="flex items-center gap-2">{un.loading && <Spinner />}
+              {[["시트 운영 매장", `시트 운영 매장 ${num(un.data?.scopes?.["시트 운영 매장"] ?? 0)}`], ["시트 미작성 매장", `시트 미작성 매장 ${num(un.data?.scopes?.["시트 미작성 매장"] ?? 0)}`]].map(([v, l]) =>
+                <Chip key={v} active={scope === v} onClick={() => setScope(v)}>{l}</Chip>)}
+              <span className="mx-1 text-slate-300">|</span>
+              {[["", "전체"], ["RT 가능", "RT 가능"], ["반납", "반납"]].map(([v, l]) => <Chip key={v} active={act === v} onClick={() => setAct(v)}>{l}</Chip>)}
+              <a href={"/api/purchase/unlisted.csv" + qs(unQ)} className="text-xs text-slate-500 underline">상세 CSV</a>
+              <Dl href={"/api/purchase/unlisted.csv" + qs({ ...unQ, upload: "1" })} label="반출 업로드 파일" /></div>} />
+          <div className="mb-3 flex flex-wrap gap-3 text-xs text-slate-500">
+            {(un.data?.by_brand ?? []).map((b: any) => <span key={b.brand_nm}>{b.brand_nm}: {num(b.qty)}개 · UID {num(b.skus)}</span>)}
+          </div>
+          <TotalGrid dark={dark} rows={un.data?.rows ?? []} columns={unCols} height={420} sum={["erp_stock_qty", "erp_avail_qty"]} />
+        </CardBody>
+      </Card>
+
       <Card>
         <CardBody>
           <SectionTitle title={`① 매입 스토어 운영상태 변경 — 운영중 ${num(ops.data?.counts?.["운영중"] ?? 0)} · 미운영 ${num(ops.data?.counts?.["미운영"] ?? 0)}`}
