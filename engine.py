@@ -40,7 +40,7 @@ TEMPLATE_BRANDS = {"오드타입"}
 
 SEVERITY = {  # error = 보충 계산에서 제외, warn = 계산은 하되 표시, info = 참고
     "SKU ID 형식 오류": "error", "SKU ID 원천에 없음": "error", "템플릿 예시 행": "error",
-    "매장명 확인 불가": "error", "매장명 후보 여럿": "error", "매장명 자동 매칭": "info", "중복 행(같은 매장·SKU)": "warn", "고정 수량 비어 있음/숫자 아님": "error",
+    "매장명 확인 불가": "error", "매장명 후보 여럿": "error", "매장명 자동 매칭": "info", "중복 행(같은 매장·SKU)": "warn", "고정 수량 없음(빈칸·0)/숫자 아님": "error",
     "위탁 SKU 아님": "error", "브랜드 불일치": "warn", "담당 MD 브랜드 아님": "warn",
     "SCM 운영중 전환 필요": "warn", "비제스트 오프라인 판매 N": "warn",
     "SCM 오프라인 판매 미반영": "warn", "오프라인 판매 비제스트 N·SCM Y": "info",
@@ -102,7 +102,7 @@ def _dup_rows(df: pd.DataFrame) -> pd.Series:
 
 
 def _listed(df: pd.DataFrame) -> pd.DataFrame:
-    """시트에서 운영한다고 적은 행. 고정 수량이 비었거나 숫자가 아니면 미운영으로 본다(사용자 2026-11-03)."""
+    """시트에서 운영한다고 적은 행. 고정 수량이 비었거나 0 이거나 숫자가 아니면 미운영으로 본다(사용자 2026-11-03)."""
     return df[df["fk_sku_id"].notna() & df["storage_id"].notna() & df["fixed_qty"].notna()]
 
 
@@ -153,6 +153,8 @@ def build(rows: pd.DataFrame, src) -> tuple[pd.DataFrame, dict]:
     df["sku_id"] = df["sku_id_in"].astype(str).str.strip().str.upper()
     # CSV 로 읽으면 "1,000" 같은 천단위 쉼표가 붙어 온다
     df["fixed_qty"] = pd.to_numeric(df["fixed_qty_in"].astype(str).str.replace(",", "").str.strip(), errors="coerce")
+    # 수량 0 도 빈칸과 똑같이 미운영(사용자 2026-11-03)
+    df["fixed_qty"] = df["fixed_qty"].where(df["fixed_qty"] != 0)
     df["flags"] = [[] for _ in range(len(df))]
 
     def flag(mask, name):
@@ -162,7 +164,7 @@ def build(rows: pd.DataFrame, src) -> tuple[pd.DataFrame, dict]:
     # ── 입력 자체 검증 ──
     flag(df["sku_id"].isin(TEMPLATE_SKUS) | df["brand_in"].isin(TEMPLATE_BRANDS), "템플릿 예시 행")
     flag(~df["sku_id"].str.match(SKU_RE), "SKU ID 형식 오류")
-    flag(df["fixed_qty"].isna(), "고정 수량 비어 있음/숫자 아님")
+    flag(df["fixed_qty"].isna(), "고정 수량 없음(빈칸·0)/숫자 아님")
 
     # ── 매장 매핑 ──
     # 매장명은 브랜드마다 조금씩 다르게 적는다 → storematch 가 정확·끝'점'·키워드 순으로 찾고,
@@ -380,7 +382,7 @@ def ops_changes(df: pd.DataFrame, ok_brands: set[str], brand_pairs, src) -> pd.D
         target_status="미운영", reason="시트에 없음 · SCM 운영중", storage_status="OPERATION_ENABLED")
     blank = _blank_keys(df)
     if len(off):
-        off["reason"] = ["시트 수량 비어 있음 · SCM 운영중" if (int(f), int(s)) in blank else r
+        off["reason"] = ["시트 수량 없음(빈칸·0) · SCM 운영중" if (int(f), int(s)) in blank else r
                          for f, s, r in zip(off["fk_sku_id"], off["storage_id"], off["reason"])]
     stores = src.whole("stores", lambda: dbx.run_df(Q.STORES)).set_index("storage_id")
     cols = ["storage_id", "fk_sku_id", "sku_id", "target_status", "reason", "brand_nm", "goods_no", "product_name",
@@ -691,7 +693,7 @@ def off_stock(df: pd.DataFrame, src, ok_pairs) -> tuple[pd.DataFrame, pd.DataFra
         run.setdefault(f, set()).add(n)
     c["action"] = ["RT 가능" if f in run else "반출" for f in c["fk_sku_id"]]
     c["run_stores"] = [", ".join(sorted(run.get(f, []))) for f in c["fk_sku_id"]]
-    c["reason"] = ["시트 수량 비어 있음" if (f, s) in blank else ("이 매장 미운영(시트에 없음)" if f in run else "시트에 없는 SKU")
+    c["reason"] = ["시트 수량 없음(빈칸·0)" if (f, s) in blank else ("이 매장 미운영(시트에 없음)" if f in run else "시트에 없는 SKU")
                    for f, s in zip(c["fk_sku_id"], c["storage_id"])]
     b2f = df.dropna(subset=["brand_nm"]).groupby("brand_nm")["src_file"].agg(lambda x: x.mode().iat[0])
     c["brand"] = c["brand_nm"].map(b2f).fillna(c["brand_nm"])

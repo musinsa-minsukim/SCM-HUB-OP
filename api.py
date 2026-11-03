@@ -236,7 +236,7 @@ def issues(brand: str | None = None, store: str | None = None, flag: str | None 
            severity: str | None = "error|warn", case: str | None = None, mismatch: int = 0,
            md: str | None = None, u: str = Depends(user)):
     """취합 검증 대상 매장×SKU
-      CASE1 = 브랜드 운영리스트(시트)에 있는 조합 → 정상 상태 '운영중' (고정 수량이 비었으면 '미운영', 사용자 2026-11-03)
+      CASE1 = 브랜드 운영리스트(시트)에 있는 조합 → 정상 상태 '운영중' (고정 수량이 비었거나 0 이면 '미운영', 사용자 2026-11-03)
       CASE2 = 시트에 없는데 SCM-HUB 에서 운영중인 조합 → 정상 상태 '미운영'
     상태(실제) = SCM-HUB storage_sku.status 가 OPERATION_ENABLED 면 운영중, 아니면(등록 없음 포함) 미운영."""
     df, _ = snap()
