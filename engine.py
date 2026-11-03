@@ -95,6 +95,25 @@ def pick_links(fk_sku_ids) -> pd.DataFrame:
     return best[LINK_COLS].reset_index(drop=True)
 
 
+def _dup_rows(df: pd.DataFrame) -> pd.Series:
+    """같은 매장·SKU 중복 — 수량이 있는 행끼리만 본다. 수량 빈 행은 미운영 취급이라, 그 뒤에 수량이 적힌 행을 중복으로 지우면 안 된다."""
+    has = df["fixed_qty"].notna() & df["storage_id"].notna()
+    return df[has].duplicated(["storage_id", "sku_id"], keep="first").reindex(df.index, fill_value=False)
+
+
+def _listed(df: pd.DataFrame) -> pd.DataFrame:
+    """시트에서 운영한다고 적은 행. 고정 수량이 비었거나 숫자가 아니면 미운영으로 본다(사용자 2026-11-03)."""
+    return df[df["fk_sku_id"].notna() & df["storage_id"].notna() & df["fixed_qty"].notna()]
+
+
+def _blank_keys(df: pd.DataFrame) -> set:
+    """수량이 빈 (fk_sku_id, storage_id) — 같은 조합에 수량 있는 행이 있으면 제외."""
+    b = df[df["fk_sku_id"].notna() & df["storage_id"].notna() & df["fixed_qty"].isna()]
+    keys = set(zip(b["fk_sku_id"].astype("int64"), b["storage_id"].astype("int64")))
+    l = _listed(df)
+    return keys - set(zip(l["fk_sku_id"].astype("int64"), l["storage_id"].astype("int64")))
+
+
 def fetch_sku(ids) -> pd.DataFrame:
     """SKU 마스터 + 대표 UID(pick_links) + 상품 브랜드·카테고리(goods_attr)."""
     sm = _run_chunked(Q.sku_master, ids)
@@ -162,7 +181,7 @@ def build(rows: pd.DataFrame, src) -> tuple[pd.DataFrame, dict]:
     df["storage_no"] = df["storage_id"].map(sid2["storage_no"])
     df["shop_no"] = df["storage_id"].map(sid2["shop_no"])
 
-    dup = df.duplicated(["storage_id", "sku_id"], keep="first") & df["storage_id"].notna()
+    dup = _dup_rows(df)
     flag(dup, "중복 행(같은 매장·SKU)")
 
     # ── SKU 마스터 ──
@@ -297,7 +316,7 @@ def replenish(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
                                      else "warn" if any(SEVERITY[f] == "warn" for f in fs)
                                      else "info" if fs else "ok")
     # 중복 행은 표시만 하고 계산은 첫 행만 (두 번 세면 보충이 2배가 된다)
-    df["is_dup"] = df.duplicated(["storage_id", "sku_id"], keep="first") & df["storage_id"].notna()
+    df["is_dup"] = _dup_rows(df)
     usable = (df["severity"] != "error") & ~df["is_dup"]
     df["target_qty"] = target_qty(df).where(usable)
     # 예상 재고 = 매장 현재고 + 이동 입고 예정 − 매장 반납/반출 예정 (사용자 결정 2026-10-21, '현재고 기준')
@@ -359,6 +378,10 @@ def ops_changes(df: pd.DataFrame, ok_brands: set[str], brand_pairs, src) -> pd.D
     keys = set(zip(sheet["storage_id"].astype("int64"), sheet["sku_id"]))
     off = en[[(int(a), b) not in keys for a, b in zip(en["storage_id"], en["sku_id"])]].assign(
         target_status="미운영", reason="시트에 없음 · SCM 운영중", storage_status="OPERATION_ENABLED")
+    blank = _blank_keys(df)
+    if len(off):
+        off["reason"] = ["시트 수량 비어 있음 · SCM 운영중" if (int(f), int(s)) in blank else r
+                         for f, s, r in zip(off["fk_sku_id"], off["storage_id"], off["reason"])]
     stores = src.whole("stores", lambda: dbx.run_df(Q.STORES)).set_index("storage_id")
     cols = ["storage_id", "fk_sku_id", "sku_id", "target_status", "reason", "brand_nm", "goods_no", "product_name",
             "option_name", "storage_status", "stock_qty"]
@@ -449,8 +472,8 @@ def rt_plan(df: pd.DataFrame, src, extra_fks=()) -> tuple[pd.DataFrame, pd.DataF
     usable = (df["severity"] != "error") & ~df["is_dup"] & df["storage_id"].notna() & df["fk_sku_id"].notna()
     scope = set(STORE_SCOPE)
     sheet = df[usable & df["storage_id"].isin(scope)]
-    # 시트에 있는 행은 수량 오류·중복이 있어도 '운영 대상' — 미운영 재고로 보내지 않는다(off_stock 과 같은 기준)
-    listed = df[df["fk_sku_id"].notna() & df["storage_id"].notna()]
+    # 시트에 수량이 적힌 행만 운영 대상(빈 수량 = 미운영, off_stock 과 같은 기준)
+    listed = _listed(df)
     sheet_keys = set(zip(listed["fk_sku_id"].astype("int64"), listed["storage_id"].astype("int64")))
     run_fks = set(sheet["fk_sku_id"].astype("int64"))            # 운영 매장이 있는 SKU
     fks = sorted(run_fks | {int(x) for x in extra_fks})
@@ -636,8 +659,9 @@ def off_stock(df: pd.DataFrame, src, ok_pairs) -> tuple[pd.DataFrame, pd.DataFra
     if c.empty:
         return empty
     c = c.assign(fk_sku_id=c["fk_sku_id"].astype("int64"), storage_id=c["storage_id"].astype("int64"))
-    # 시트에 있는 행은 수량 오류가 있어도 '운영 대상' 이다 — 반출로 잡지 않는다
-    sh = df[df["fk_sku_id"].notna() & df["storage_id"].notna()]
+    # 시트에 수량이 적힌 행만 운영 대상. 수량이 비었으면 미운영 → 반출·RT 대상(사용자 2026-11-03)
+    sh = _listed(df)
+    blank = _blank_keys(df)
     keys = set(zip(sh["fk_sku_id"].astype("int64"), sh["storage_id"].astype("int64")))
     c = c[[(a, b) not in keys for a, b in zip(c["fk_sku_id"], c["storage_id"])]]
     if c.empty:
@@ -667,7 +691,8 @@ def off_stock(df: pd.DataFrame, src, ok_pairs) -> tuple[pd.DataFrame, pd.DataFra
         run.setdefault(f, set()).add(n)
     c["action"] = ["RT 가능" if f in run else "반출" for f in c["fk_sku_id"]]
     c["run_stores"] = [", ".join(sorted(run.get(f, []))) for f in c["fk_sku_id"]]
-    c["reason"] = ["이 매장 미운영(시트에 없음)" if f in run else "시트에 없는 SKU" for f in c["fk_sku_id"]]
+    c["reason"] = ["시트 수량 비어 있음" if (f, s) in blank else ("이 매장 미운영(시트에 없음)" if f in run else "시트에 없는 SKU")
+                   for f, s in zip(c["fk_sku_id"], c["storage_id"])]
     b2f = df.dropna(subset=["brand_nm"]).groupby("brand_nm")["src_file"].agg(lambda x: x.mode().iat[0])
     c["brand"] = c["brand_nm"].map(b2f).fillna(c["brand_nm"])
     sales = _sales(src, c[["sku_id", "fk_sku_id"]].drop_duplicates("sku_id"))
