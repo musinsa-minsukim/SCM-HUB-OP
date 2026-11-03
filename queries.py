@@ -350,6 +350,9 @@ SELECT di.fk_sku_id, di.fk_storage_id storage_id,
        CAST(SUM(di.end_quantity) AS BIGINT) stock_qty,
        CAST(SUM(di.end_available_quantity) AS BIGINT) avail_qty,
        CAST(SUM(di.expected_in_quantity + di.moving_in_quantity) AS BIGINT) incoming_qty,
+       CAST(SUM(di.expected_in_quantity) AS BIGINT) req_in_qty,
+       CAST(SUM(di.moving_in_quantity) AS BIGINT) moving_in_qty,
+       CAST(SUM(di.expected_inbound_quantity) AS BIGINT) direct_in_qty,
        CAST(SUM(di.expected_out_quantity + di.moving_out_quantity + COALESCE(di.expected_vendor_return_quantity, 0)) AS BIGINT) outgoing_qty
 FROM ocmp.scm_hub.daily_inventory di
 WHERE di.stock_date = (SELECT d FROM d) AND di.fk_storage_id IN ({int_list(storage_ids)})

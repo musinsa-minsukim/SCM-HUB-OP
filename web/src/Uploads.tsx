@@ -39,7 +39,11 @@ const moveCols: ColDef[] = [
   colText("barcode", "바코드", { minWidth: 150 }),
   { ...colNum("move_qty", "이동수량", "int"), cellStyle: { color: "var(--ratio-up)", fontWeight: 700, textAlign: "right" } },
   { ...colNum("ret_qty", "과재고 반출 수량", "int"), cellStyle: { color: "var(--ratio-down)", fontWeight: 700, textAlign: "right" } },
-  colNum("fixed_qty", "고정 운영 수량", "int"),
+  {
+    ...colNum("fixed_qty", "고정 운영 수량", "int", { minWidth: 110, headerTooltip: "브랜드 시트 값. 시트에 없거나 수량이 빈 미운영 재고는 '미운영 반출'" }),
+    valueFormatter: (p: any) => (p.data?.unop ? "미운영 반출" : p.value == null ? "" : Number(p.value).toLocaleString()),
+    cellStyle: ((p: any) => (p.data?.unop ? { color: "var(--ratio-down)", fontWeight: 700, textAlign: "right" } : { textAlign: "right" })) as any,
+  } as ColDef,
   colNum("stock_qty", "매장 현재고", "int"),
   colNum("avail_qty", "판매가능", "int", { headerTooltip: "매장 현재고 중 판매 가능한 수량(불량·보류·반납 출고 중 제외). 과재고 반출은 이 수량 이내" }),
   COL.mfs,

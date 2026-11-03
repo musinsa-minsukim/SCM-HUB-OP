@@ -452,13 +452,28 @@ def _moves(ret: str, brand: str | None, store: str | None, md: str | None = None
             return 0 if f != f else int(f)
         except (TypeError, ValueError):
             return 0
+    # 매장×SKU 재고 — 바코드별로 줄이 나뉘어도 첫 줄에만 넣는다(합계 중복 방지, 과재고 반출 줄과 같은 방식)
+    off = _extra("offstock.parquet")
+    off_by = {(a, b): i for i, (a, b) in enumerate(zip(off["storage_no"], off["sku_id"]))} if len(off) else {}
+    seen = set()
     for r in rr.itertuples():
-        lines.append({"storage_no": r.from_storage_no, "sku_id": r.sku_id, "goods_no": r.goods_no, "barcode": r.barcode,
+        key = (r.from_storage_no, r.sku_id)
+        first = key not in seen
+        seen.add(key)
+        o = off.iloc[off_by[key]] if first and key in off_by else None
+        stock = n(r.from_stock) if first else None
+        extra = {}
+        if first:
+            g = lambda c: n(o[c]) if o is not None and c in o else 0
+            inc, out_ = g("incoming_qty"), g("outgoing_qty")
+            extra = {"incoming_qty": inc, "req_in_qty": g("req_in_qty"), "moving_in_qty": g("moving_in_qty"), "direct_in_qty": g("direct_in_qty"),
+                     "outgoing_qty": out_, "expected_qty": stock + inc - out_}
+        lines.append({"unop": True, **extra, "storage_no": r.from_storage_no, "sku_id": r.sku_id, "goods_no": r.goods_no, "barcode": r.barcode,
                       "move_qty": 0, "ret_qty": n(r.rt_qty), "brand": r.src_file, "store_name": r.from_store,
                       "product_name": r.product_name, "option_name": r.option_name,
                       "off_4w": 0, "off_cum": n(r.from_off_cum), "off_w1": n(r.from_off_w1),
-                      "note": "미운영 매장 재고 반납(운영 매장 없음)",
-                      "stock_qty": n(r.from_stock), "avail_qty": n(r.from_avail), "mfs_qty": n(r.mfs_qty)})
+                      "note": "미운영 반출 (운영 매장 없음)",
+                      "stock_qty": stock, "avail_qty": n(r.from_avail) if first else None, "mfs_qty": n(r.mfs_qty)})
     m = pd.DataFrame(lines)
     if m.empty:
         return m
