@@ -122,15 +122,8 @@ def _finish(out: pd.DataFrame, summary: dict, files: list, tb: pd.DataFrame, t0:
     ok_brands = set(out.loc[out["src_file"].isin(ok_files), "brand_nm"].dropna())
     pairs = list(zip(tb["com_id"], tb["brand"]))
     ops = engine.ops_changes(out, ok_brands, pairs, src)
-    # RT(점간이동) 추천 — 미운영 매장 재고는 운영 매장으로 전부(없으면 반납), 과재고는 보충 필요만. MFS 배분(②)과 별개
-    c2fks = ops.loc[ops["target_status"] == "미운영", "fk_sku_id"].dropna().astype("int64").unique() if len(ops) else []
-    rt, out = engine.rt_plan(out, src, c2fks)
-    rt = engine.rt_enrich(rt, out, src)
-    for c in rt.columns:
-        if rt[c].dtype == object:
-            rt[c] = rt[c].map(lambda v: "" if v is None or (isinstance(v, float) and pd.isna(v)) else str(v))
-    rt.to_parquet(os.path.join(CACHE_DIR, "rt.parquet"), index=False)
     # 미운영 재고 반출 탭 — 시트를 정상으로 읽은 브랜드만. 실패해도 다른 결과는 저장한다
+    off = pd.DataFrame()
     try:
         ok_rows = out[out["src_file"].isin(ok_files) & out["com_id"].notna() & out["brand"].notna()]
         ok_pairs = sorted(set(zip(ok_rows["com_id"], ok_rows["brand"])))
@@ -144,6 +137,18 @@ def _finish(out: pd.DataFrame, summary: dict, files: list, tb: pd.DataFrame, t0:
         summary["offstock_qty"] = int(off["stock_qty"].sum()) if len(off) else 0
     except Exception as e:  # noqa: BLE001
         summary["offstock_error"] = str(e)[:300]
+    # RT(점간이동) 추천 — 미운영 매장 재고는 운영 매장으로 전부(없으면 반납), 과재고는 보충 필요만. MFS 배분(②)과 별개
+    # ⚠️ 대상 SKU = 시트 + SCM 운영중(CASE2) + 이미 SCM 미운영인데 재고만 남은 SKU(off_stock).
+    #    마지막이 빠져 있어 휠라 킥스 성수 80 SKU·128개(전부 OPERATION_DISABLED)의 반납이 안 잡혔다(2026-11-03)
+    c2fks = ops.loc[ops["target_status"] == "미운영", "fk_sku_id"].dropna().astype("int64").unique().tolist() if len(ops) else []
+    if len(off):
+        c2fks = sorted(set(c2fks) | set(off["fk_sku_id"].astype("int64")))
+    rt, out = engine.rt_plan(out, src, c2fks)
+    rt = engine.rt_enrich(rt, out, src)
+    for c in rt.columns:
+        if rt[c].dtype == object:
+            rt[c] = rt[c].map(lambda v: "" if v is None or (isinstance(v, float) and pd.isna(v)) else str(v))
+    rt.to_parquet(os.path.join(CACHE_DIR, "rt.parquet"), index=False)
     summary["rt_lines"] = len(rt)
     summary["rt_qty"] = int(rt.loc[rt["priority"] != 3, "rt_qty"].sum()) if len(rt) else 0
     summary["rt_qty_p1"] = int(rt.loc[rt["priority"] == 1, "rt_qty"].sum()) if len(rt) else 0

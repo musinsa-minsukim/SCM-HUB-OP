@@ -449,7 +449,9 @@ def rt_plan(df: pd.DataFrame, src, extra_fks=()) -> tuple[pd.DataFrame, pd.DataF
     usable = (df["severity"] != "error") & ~df["is_dup"] & df["storage_id"].notna() & df["fk_sku_id"].notna()
     scope = set(STORE_SCOPE)
     sheet = df[usable & df["storage_id"].isin(scope)]
-    sheet_keys = set(zip(sheet["fk_sku_id"].astype("int64"), sheet["storage_id"].astype("int64")))
+    # 시트에 있는 행은 수량 오류·중복이 있어도 '운영 대상' — 미운영 재고로 보내지 않는다(off_stock 과 같은 기준)
+    listed = df[df["fk_sku_id"].notna() & df["storage_id"].notna()]
+    sheet_keys = set(zip(listed["fk_sku_id"].astype("int64"), listed["storage_id"].astype("int64")))
     run_fks = set(sheet["fk_sku_id"].astype("int64"))            # 운영 매장이 있는 SKU
     fks = sorted(run_fks | {int(x) for x in extra_fks})
     if not fks:
@@ -655,7 +657,8 @@ def off_stock(df: pd.DataFrame, src, ok_pairs) -> tuple[pd.DataFrame, pd.DataFra
     c["storage_no"] = c["storage_id"].map(stores["storage_no"])
     c["shop_no"] = c["storage_id"].map(stores["shop_no"]).astype("Int64")
     sids = _all_sids(src)
-    ss = src.get("ss", fks, "fk_sku_id", lambda ks: _run_chunked(Q.storage_sku, ks, sids), int)
+    # 운영상태는 저장값(SCM-HUB 버튼 때만 갱신)이 아니라 매번 새로 읽는다 — 이 탭은 '지금 미운영인가' 를 보는 화면이다
+    ss = _run_chunked(Q.storage_sku, fks, sids)
     stat = {(int(a), int(b)): v for a, b, v in zip(ss["fk_sku_id"], ss["storage_id"], ss["storage_status"])} if "storage_id" in ss else {}
     c["storage_status"] = [stat.get((a, b), "") for a, b in zip(c["fk_sku_id"], c["storage_id"])]
     run: dict = {}
