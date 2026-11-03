@@ -791,6 +791,101 @@ def purchase_csv(store: str | None = None, q: str | None = None, severity: str |
     return _csv(df[[c for c in PUR_CSV if c in df]].rename(columns=PUR_CSV), "purchase_store_sku.csv")
 
 
+# ── 미운영 재고 반출 (2026-11-03) — 시트에 없는 매장×SKU 인데 매장 재고가 있는 것. 위탁 + 매입 ─────────
+OFF_CSV = {"gubun": "구분", "action": "처리", "brand": "브랜드", "store_name": "매장", "storage_no": "스토어코드", "sku_id": "SKU ID",
+           "uid": "UID", "product_name": "상품명", "option_name": "옵션명", "style_no": "스타일넘버", "small_nm": "카테고리",
+           "stock_qty": "매장 현재고", "avail_qty": "판매가능(반출 가능)", "outgoing_qty": "매장 반납/반출 예정", "incoming_qty": "이동 입고 예정",
+           "wh_qty": "MFS·허브 재고", "off_w1": "7일 판매", "off_cum": "누적 판매", "storage_status": "SCM 운영상태",
+           "reason": "사유", "run_stores": "운영 매장"}
+
+
+def _offstock() -> pd.DataFrame:
+    frames = []
+    c = _extra("offstock.parquet")
+    if len(c):
+        frames.append(pd.DataFrame({
+            "gubun": "위탁", "action": c["action"], "brand": c["brand"], "store_name": c["store_name"], "storage_no": c["storage_no"],
+            "sku_id": c["sku_id"], "uid": pd.to_numeric(c["goods_no"], errors="coerce").astype("Int64").astype(str).replace("<NA>", ""),
+            "product_name": c["product_name"], "option_name": c["option_name"], "style_no": c.get("sku_style_no", ""), "small_nm": "",
+            "stock_qty": c["stock_qty"], "avail_qty": c["avail_qty"], "outgoing_qty": c["outgoing_qty"], "incoming_qty": c["incoming_qty"],
+            "wh_qty": c["mfs_qty"], "off_w1": c["off_w1"], "off_cum": c["off_cum"], "storage_status": c["storage_status"],
+            "reason": c["reason"], "run_stores": c["run_stores"], "barcode": ""}))
+    p = _extra("purchase_unlisted.parquet")
+    if len(p):
+        p = p[p["store_scope"] == "시트 운영 매장"]
+    if len(p):
+        frames.append(pd.DataFrame({
+            "gubun": "매입", "action": p["action"].replace({"반납": "반출"}), "brand": p["brand_nm"], "store_name": p["store_name"],
+            "storage_no": p["storage_no"], "sku_id": p["sku_id"], "uid": p["uid"].astype(str), "product_name": p["product_name"],
+            "option_name": p["size"], "style_no": "", "small_nm": p["small_nm"], "stock_qty": p["erp_stock_qty"], "avail_qty": p["erp_avail_qty"],
+            "outgoing_qty": 0, "incoming_qty": 0, "wh_qty": p["hub_qty"], "off_w1": p["off_w1"], "off_cum": p["off_cum"], "storage_status": "",
+            "reason": p["reason"], "run_stores": p["rt_stores"], "barcode": p["barcode"]}))
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
+def _off_filter(df, q, store, brand, gubun, action):
+    if df.empty:
+        return df
+    if gubun:
+        df = df[df["gubun"] == gubun]
+    if action:
+        df = df[df["action"] == action]
+    if store:
+        df = df[df["store_name"].isin(store.split("|"))]
+    if brand:
+        df = df[df["brand"].isin(brand.split("|"))]
+    if q:
+        import re
+        toks = [t.strip().upper() for t in re.split(r"[\n,;\t]+", q) if t.strip()]
+        hay = (df["sku_id"].fillna("") + " " + df["uid"].fillna("") + " " + df["style_no"].fillna("") + " " + df["product_name"].fillna("")).str.upper()
+        mask = pd.Series(False, index=df.index)
+        for t in toks:
+            mask |= hay.str.contains(t, regex=False)
+        df = df[mask]
+    return df
+
+
+@app.get("/api/offstock")
+def offstock(q: str | None = None, store: str | None = None, brand: str | None = None, gubun: str | None = None,
+             action: str | None = None, u: str = Depends(user)):
+    base = _offstock()
+    df = _off_filter(base, q, store, brand, gubun, action)
+    s = lambda d, c: int(pd.to_numeric(d[c], errors="coerce").sum()) if len(d) else 0
+    return {"rows": records(df.head(20000)), "total": len(df), "stock_qty": s(df, "stock_qty"), "avail_qty": s(df, "avail_qty"),
+            "ret_qty": s(df[df["action"] == "반출"], "avail_qty") if len(df) else 0,
+            "rt_qty": s(df[df["action"] == "RT 가능"], "avail_qty") if len(df) else 0,
+            "stores": sorted(x for x in base["store_name"].dropna().unique() if x) if len(base) else [],
+            "brands": sorted(x for x in base["brand"].dropna().unique() if x) if len(base) else []}
+
+
+@app.get("/api/offstock.csv")
+def offstock_csv(q: str | None = None, store: str | None = None, brand: str | None = None, gubun: str | None = None,
+                 action: str | None = None, upload: int = 0, u: str = Depends(user)):
+    df = _off_filter(_offstock(), q, store, brand, gubun, action)
+    if not upload:
+        return _csv(df[[c for c in OFF_CSV if c in df]].rename(columns=OFF_CSV), "offstock_detail.csv")
+    # 재고 보충 등록 양식 그대로 — 이동수량 0, 과재고 반출 수량 = 판매가능. 위탁은 재고 있는 바코드별로 줄을 나눈다
+    d = df[(pd.to_numeric(df["avail_qty"], errors="coerce").fillna(0) > 0) & (df["sku_id"].fillna("") != "")] if len(df) else df
+    rows = []
+    bc = _extra("offstock_bc.parquet")
+    by: dict = {}
+    for b in bc.itertuples() if len(bc) else []:
+        by.setdefault((b.storage_no, b.sku_id), []).append((b.barcode, int(b.avail_qty)))
+    for r in d.itertuples():
+        left = int(float(r.avail_qty))
+        cands = sorted(by.get((r.storage_no, r.sku_id), []), key=lambda x: -x[1]) if r.gubun == "위탁" else []
+        for code, n in cands:
+            if left <= 0:
+                break
+            t = min(left, n)
+            rows.append((r.storage_no, r.sku_id, code, 0, t))
+            left -= t
+        if left > 0:
+            rows.append((r.storage_no, r.sku_id, r.barcode, 0, left))
+    out = pd.DataFrame(rows, columns=["스토어코드", "SKU 번호", "바코드", "이동수량", "과재고 반출 수량"])
+    return _csv(out, "offstock_return.csv")
+
+
 @app.get("/api/moves")
 def moves(ret: str = "all", brand: str | None = None, store: str | None = None, md: str | None = None,
           u: str = Depends(user)):

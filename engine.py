@@ -621,6 +621,68 @@ def rt_enrich(rt: pd.DataFrame, df: pd.DataFrame, src) -> pd.DataFrame:
     return rt.sort_values(["src_file", "sku_id", "priority", "to_off_w1", "to_off_4w", "to_off_cum"],
                           ascending=[True, True, True, False, False, False]).reset_index(drop=True)
 
+
+def off_stock(df: pd.DataFrame, src, ok_pairs) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """미운영 재고 반출 — 브랜드 시트에 없는 매장×SKU 인데 매장 재고가 있는 것(위탁). 반환: (매장×SKU 표, 바코드별 반출 줄).
+    시트를 정상으로 읽은 브랜드만 본다(읽기 실패 브랜드를 통째로 반출로 잡으면 사고).
+    처리 = 그 SKU 를 시트에서 운영하는 매장이 있으면 'RT 가능', 없으면 '반출'. 수량은 판매가능(이미 출고 중인 건 빠져 있음)."""
+    empty = pd.DataFrame(), pd.DataFrame()
+    if not ok_pairs:
+        return empty
+    progress.step("미운영 재고: 매장 재고 조회")
+    c = dbx.run_df(Q.off_stock_candidates(STORE_SCOPE, ok_pairs))
+    if c.empty:
+        return empty
+    c = c.assign(fk_sku_id=c["fk_sku_id"].astype("int64"), storage_id=c["storage_id"].astype("int64"))
+    # 시트에 있는 행은 수량 오류가 있어도 '운영 대상' 이다 — 반출로 잡지 않는다
+    sh = df[df["fk_sku_id"].notna() & df["storage_id"].notna()]
+    keys = set(zip(sh["fk_sku_id"].astype("int64"), sh["storage_id"].astype("int64")))
+    c = c[[(a, b) not in keys for a, b in zip(c["fk_sku_id"], c["storage_id"])]]
+    if c.empty:
+        return empty
+    fks = c["fk_sku_id"].unique()
+    sk = pd.concat([dbx.run_df(f"SELECT _id fk_sku_id, sku_id, purchase_type FROM ocmp.scm_hub.sku WHERE _id IN ({Q.int_list(p)})")
+                    for p in _chunks(fks)], ignore_index=True)
+    sk = sk[sk["purchase_type"] == "CONSIGNMENT"]
+    c = c.merge(sk[["fk_sku_id", "sku_id"]].assign(fk_sku_id=sk["fk_sku_id"].astype("int64")), on="fk_sku_id")
+    if c.empty:
+        return empty
+    fks = c["fk_sku_id"].unique()
+    m = src.get("sku", c["sku_id"].unique(), "sku_id", fetch_sku).drop_duplicates("sku_id")
+    c = c.merge(m[["sku_id", "goods_no", "product_name", "option_name", "brand_nm", "sku_style_no"]], on="sku_id", how="left")
+    stores = src.whole("stores", lambda: dbx.run_df(Q.STORES)).drop_duplicates("storage_id").set_index("storage_id")
+    c["store_name"] = c["storage_id"].map(stores["scm_name"])
+    c["storage_no"] = c["storage_id"].map(stores["storage_no"])
+    c["shop_no"] = c["storage_id"].map(stores["shop_no"]).astype("Int64")
+    sids = _all_sids(src)
+    ss = src.get("ss", fks, "fk_sku_id", lambda ks: _run_chunked(Q.storage_sku, ks, sids), int)
+    stat = {(int(a), int(b)): v for a, b, v in zip(ss["fk_sku_id"], ss["storage_id"], ss["storage_status"])} if "storage_id" in ss else {}
+    c["storage_status"] = [stat.get((a, b), "") for a, b in zip(c["fk_sku_id"], c["storage_id"])]
+    run: dict = {}
+    ok = sh[sh["severity"] != "error"]
+    for f, n in zip(ok["fk_sku_id"].astype("int64"), ok["store_name"]):
+        run.setdefault(f, set()).add(n)
+    c["action"] = ["RT 가능" if f in run else "반출" for f in c["fk_sku_id"]]
+    c["run_stores"] = [", ".join(sorted(run.get(f, []))) for f in c["fk_sku_id"]]
+    c["reason"] = ["이 매장 미운영(시트에 없음)" if f in run else "시트에 없는 SKU" for f in c["fk_sku_id"]]
+    b2f = df.dropna(subset=["brand_nm"]).groupby("brand_nm")["src_file"].agg(lambda x: x.mode().iat[0])
+    c["brand"] = c["brand_nm"].map(b2f).fillna(c["brand_nm"])
+    sales = _sales(src, c[["sku_id", "fk_sku_id"]].drop_duplicates("sku_id"))
+    if len(sales) and "shop_no" in sales:
+        c = c.merge(sales.astype({"shop_no": "Int64"})[["sku_id", "shop_no", "off_w1", "off_cum"]].drop_duplicates(["sku_id", "shop_no"]),
+                    on=["sku_id", "shop_no"], how="left")
+    mfs = src.get("mfs", c["sku_id"].unique(), "sku_id", lambda ks: _run_chunked(Q.mfs_stock, ks))
+    if len(mfs):
+        c = c.merge(mfs.drop_duplicates("sku_id")[["sku_id", "mfs_qty"]], on="sku_id", how="left")
+    for col in ("off_w1", "off_cum", "mfs_qty"):
+        c[col] = pd.to_numeric(c[col], errors="coerce").fillna(0).astype("int64") if col in c else 0
+    bc = src.get("stock_bc", fks, "fk_sku_id", lambda ks: _run_chunked(Q.store_stock_barcode, ks, sids), int)
+    lines = pd.DataFrame()
+    if len(bc) and "storage_id" in bc:
+        lines = bc.assign(fk_sku_id=bc["fk_sku_id"].astype("int64"), storage_id=bc["storage_id"].astype("int64")).merge(
+            c[["fk_sku_id", "storage_id", "sku_id", "storage_no"]], on=["fk_sku_id", "storage_id"])
+    return c.sort_values(["brand", "store_name", "sku_id"]).reset_index(drop=True), lines
+
 OUT_COLS = ["src_file", "src_row", "brand_in", "store_name", "sku_id", "goods_no", "product_name", "option_name",
             "rep_barcode", "other_barcodes", "n_barcode", "consignment_type", "storage_status",
             "fixed_qty", "stock_qty", "avail_qty", "incoming_qty", "outgoing_qty",

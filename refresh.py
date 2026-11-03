@@ -130,6 +130,20 @@ def _finish(out: pd.DataFrame, summary: dict, files: list, tb: pd.DataFrame, t0:
         if rt[c].dtype == object:
             rt[c] = rt[c].map(lambda v: "" if v is None or (isinstance(v, float) and pd.isna(v)) else str(v))
     rt.to_parquet(os.path.join(CACHE_DIR, "rt.parquet"), index=False)
+    # 미운영 재고 반출 탭 — 시트를 정상으로 읽은 브랜드만. 실패해도 다른 결과는 저장한다
+    try:
+        ok_rows = out[out["src_file"].isin(ok_files) & out["com_id"].notna() & out["brand"].notna()]
+        ok_pairs = sorted(set(zip(ok_rows["com_id"], ok_rows["brand"])))
+        off, off_bc = engine.off_stock(out, src, ok_pairs)
+        for name, x in (("offstock.parquet", off), ("offstock_bc.parquet", off_bc)):
+            x = x.copy()
+            for c in x.columns:
+                if x[c].dtype == object:
+                    x[c] = x[c].map(lambda v: "" if v is None or (isinstance(v, float) and pd.isna(v)) else str(v))
+            x.to_parquet(os.path.join(CACHE_DIR, name), index=False)
+        summary["offstock_qty"] = int(off["stock_qty"].sum()) if len(off) else 0
+    except Exception as e:  # noqa: BLE001
+        summary["offstock_error"] = str(e)[:300]
     summary["rt_lines"] = len(rt)
     summary["rt_qty"] = int(rt.loc[rt["priority"] != 3, "rt_qty"].sum()) if len(rt) else 0
     summary["rt_qty_p1"] = int(rt.loc[rt["priority"] == 1, "rt_qty"].sum()) if len(rt) else 0

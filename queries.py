@@ -338,6 +338,25 @@ SELECT CAST(id AS BIGINT) uid, style_number FROM (
 LIMIT 5000"""
 
 
+# 미운영 재고 반출 후보 (2026-11-03) — 시트를 정상으로 읽은 브랜드의 대상 매장 재고 전체.
+# SKU 를 시트·CASE2 로 좁히지 않는다: 이미 미운영 처리되고 재고만 남은 SKU 도 잡아야 해서.
+def off_stock_candidates(storage_ids: Iterable[int], pairs: Iterable[tuple[str, str]]) -> str:
+    cond = " OR ".join(f"(company_id = {lit(c)} AND brand_id = {lit(b)})" for c, b in pairs) or "FALSE"
+    return f"""
+WITH d AS (SELECT MAX(stock_date) d FROM ocmp.scm_hub.daily_inventory
+           WHERE stock_date >= date_format(date_sub(current_date(), 5), 'yyyy-MM-dd')),
+p AS (SELECT DISTINCT CAST(id AS STRING) uid FROM musinsa.stock.product WHERE {cond})
+SELECT di.fk_sku_id, di.fk_storage_id storage_id,
+       CAST(SUM(di.end_quantity) AS BIGINT) stock_qty,
+       CAST(SUM(di.end_available_quantity) AS BIGINT) avail_qty,
+       CAST(SUM(di.expected_in_quantity + di.moving_in_quantity) AS BIGINT) incoming_qty,
+       CAST(SUM(di.expected_out_quantity + di.moving_out_quantity + COALESCE(di.expected_vendor_return_quantity, 0)) AS BIGINT) outgoing_qty
+FROM ocmp.scm_hub.daily_inventory di
+WHERE di.stock_date = (SELECT d FROM d) AND di.fk_storage_id IN ({int_list(storage_ids)})
+  AND CAST(di.product_no AS STRING) IN (SELECT uid FROM p)
+GROUP BY 1, 2 HAVING SUM(di.end_quantity) > 0"""
+
+
 def mfs_stock(sku_ids: Iterable[str]) -> str:
     return f"""
 WITH d AS (SELECT MAX(stock_date) d FROM ocmp.scm_hub.daily_inventory
